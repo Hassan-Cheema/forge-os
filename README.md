@@ -77,6 +77,8 @@ Open [http://localhost:3000](http://localhost:3000).
 |---|---|
 | `NEXT_PUBLIC_SUPABASE_URL` | [Supabase dashboard](https://supabase.com/dashboard) → Project Settings → API |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Same page, anon/public key |
+| `SUPABASE_SERVICE_ROLE_KEY` | Same page, service_role key (server-side only — never expose to client) |
+| `ANTHROPIC_API_KEY` | [Anthropic console](https://console.anthropic.com/settings/api-keys) |
 | `STRIPE_SECRET_KEY` | [Stripe dashboard](https://dashboard.stripe.com/apikeys) → Secret key |
 | `STRIPE_WEBHOOK_SECRET` | Stripe dashboard → Webhooks → your endpoint → Signing secret |
 | `NEXT_PUBLIC_APP_URL` | Your deployment URL, e.g. `https://forge-os.vercel.app` |
@@ -174,6 +176,28 @@ stripe listen --forward-to localhost:3000/api/stripe/webhook
 2. Enable **Email** provider under Authentication → Providers
 3. Set **Site URL** to your app URL under Authentication → URL Configuration
 4. Add `http://localhost:3000/auth/callback` to **Redirect URLs**
+5. Run the database migration (see [Database schema](#database-schema) below)
+
+---
+
+## Database schema
+
+Run `supabase/migrations/001_agent_tables.sql` once in the [Supabase SQL editor](https://supabase.com/dashboard/project/_/sql/new). It creates three tables:
+
+| Table | Purpose |
+|---|---|
+| `agents` | One row per agent — tracks `status` (idle / running / paused / error) |
+| `actions` | Audit log of every tool call decision (execute / queue / block) |
+| `pending_approvals` | Actions that exceeded the user's risk limit, awaiting human review |
+
+All tables have Row Level Security enabled so users can only see their own rows.
+
+```sql
+-- Quick check: run this after the migration to confirm the tables exist
+SELECT table_name FROM information_schema.tables
+WHERE table_schema = 'public'
+  AND table_name IN ('agents', 'actions', 'pending_approvals');
+```
 
 ---
 

@@ -54,11 +54,20 @@ export function getAllTools(): AgentTool[] {
       category: "read",
       riskDescription: "Read-only web search, no side effects.",
       async execute(input) {
-        const res = await fetch(
-          `/api/search?q=${encodeURIComponent(input.query as string)}`
-        );
+        const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(
+          input.query as string
+        )}&format=json&no_redirect=1&no_html=1&skip_disambig=1`;
+        const res = await fetch(url, { headers: { "User-Agent": "forge-os/1.0" } });
         if (!res.ok) throw new Error(`Search failed: ${res.statusText}`);
-        return JSON.stringify(await res.json());
+        const data = await res.json();
+        return JSON.stringify({
+          abstract: data.Abstract || null,
+          answer: data.Answer || null,
+          relatedTopics: (data.RelatedTopics || [])
+            .filter((t: { Text?: string; FirstURL?: string }) => t.Text && t.FirstURL)
+            .slice(0, 8)
+            .map((t: { Text: string; FirstURL: string }) => ({ text: t.Text, url: t.FirstURL })),
+        });
       },
     },
     {

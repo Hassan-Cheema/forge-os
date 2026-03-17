@@ -2,6 +2,13 @@ import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import AgentRunner from "./AgentRunner";
 
+export interface Report {
+  id: string;
+  prompt: string;
+  content: string;
+  created_at: string;
+}
+
 export default async function DashboardPage({
   searchParams,
 }: {
@@ -16,6 +23,13 @@ export default async function DashboardPage({
 
   const params = await searchParams;
   const justPaid = params.checkout === "success";
+
+  // Fetch reports for this user, newest first
+  const { data: reports } = await supabase
+    .from("reports")
+    .select("id, prompt, content, created_at")
+    .eq("user_id", user.id)
+    .order("created_at", { ascending: false });
 
   async function signOut() {
     "use server";
@@ -52,7 +66,7 @@ export default async function DashboardPage({
       )}
 
       {/* Agent runner — the whole product */}
-      <AgentRunner />
+      <AgentRunner reports={(reports as Report[]) ?? []} />
     </div>
   );
 }

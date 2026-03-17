@@ -6,13 +6,28 @@ export async function GET(request: Request) {
   const code = searchParams.get("code");
   const next = searchParams.get("next") ?? "/dashboard";
 
+  // Supabase may surface an error directly in the callback URL
+  const oauthError = searchParams.get("error_description") ?? searchParams.get("error");
+  if (oauthError) {
+    return NextResponse.redirect(
+      `${origin}/auth/login?error=${encodeURIComponent(oauthError)}`
+    );
+  }
+
   if (code) {
     const supabase = await createClient();
     const { error } = await supabase.auth.exchangeCodeForSession(code);
+
     if (!error) {
       return NextResponse.redirect(`${origin}${next}`);
     }
+
+    return NextResponse.redirect(
+      `${origin}/auth/login?error=${encodeURIComponent(error.message)}`
+    );
   }
 
-  return NextResponse.redirect(`${origin}/auth/login?error=auth_callback_failed`);
+  return NextResponse.redirect(
+    `${origin}/auth/login?error=${encodeURIComponent("Sign-in failed. Please try again.")}`
+  );
 }

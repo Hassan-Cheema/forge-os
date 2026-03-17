@@ -83,12 +83,17 @@ export function getAllTools(): AgentTool[] {
       category: "read",
       riskDescription: "Read-only HTTP GET, no side effects.",
       async execute(input) {
-        const res = await fetch(input.url as string);
-        if (!res.ok) throw new Error(`Fetch failed: ${res.statusText}`);
-        const html = await res.text();
-        // Strip tags for brevity
-        const text = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-        return text.slice(0, 4000);
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 8_000);
+        try {
+          const res = await fetch(input.url as string, { signal: controller.signal });
+          if (!res.ok) throw new Error(`Fetch failed: ${res.statusText}`);
+          const html = await res.text();
+          const text = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+          return text.slice(0, 2000);
+        } finally {
+          clearTimeout(timer);
+        }
       },
     },
     {
@@ -256,7 +261,7 @@ export class AgentSpawner {
         goal: plan.goal,
         tools,
         userRiskLimit: this.userRiskLimit,
-        maxSteps: 15,
+        maxSteps: 6,
         supabaseUrl: this.supabaseUrl,
         supabaseServiceKey: this.supabaseServiceKey,
         anthropicApiKey: this.anthropicApiKey,
@@ -303,6 +308,7 @@ export class AgentSpawner {
             actionsBlocked: 0,
             actionsQueued: 0,
             summary: `Agent threw an unhandled error: ${message}`,
+            artifacts: [],
           },
         };
       }

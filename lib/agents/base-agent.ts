@@ -27,6 +27,13 @@ export interface AgentTool {
   execute: (input: Record<string, unknown>) => Promise<string>;
 }
 
+/** A piece of content produced by the agent (note, file, post, email). */
+export interface AgentArtifact {
+  type: "note" | "file" | "post" | "email";
+  title: string;
+  content: string;
+}
+
 export interface BaseAgentConfig {
   id: string;
   userId: string;
@@ -36,7 +43,7 @@ export interface BaseAgentConfig {
   tools: AgentTool[];
   /** 1–10. Actions scored above this are queued for human approval. */
   userRiskLimit: number;
-  /** Hard cap on agentic loop iterations */
+  /** Hard cap on agentic loop iterations. Default: 8 */
   maxSteps?: number;
   /** Extra instructions prepended to the system prompt */
   systemPrompt?: string;
@@ -50,8 +57,22 @@ export interface AgentRunResult {
   stepsExecuted: number;
   actionsBlocked: number;
   actionsQueued: number;
+  /** Claude's last text message — the narrative summary */
   summary: string;
+  /** All notes, files, posts, emails the agent produced */
+  artifacts: AgentArtifact[];
 }
+
+// Tools whose *inputs* contain the content worth showing to the user
+const ARTIFACT_TOOL_MAP: Record<string, AgentArtifact["type"]> = {
+  save_note: "note",
+  create_file: "file",
+  draft_social_post: "post",
+  draft_email: "email",
+};
+
+/** Hard wall-clock limit per agent run */
+const AGENT_TIMEOUT_MS = 90_000;
 
 // ─── BaseAgent ────────────────────────────────────────────────────────────────
 
@@ -61,6 +82,7 @@ export class BaseAgent {
   private supabase: SupabaseClient;
   private limiter: RiskLimiter;
   private status: AgentStatus = "idle";
+  private artifacts: AgentArtifact[] = [];
 
   constructor(config: BaseAgentConfig) {
     this.config = config;
@@ -82,11 +104,13 @@ export class BaseAgent {
   async run(): Promise<AgentRunResult> {
     await this.setStatus("running");
     this.log("Starting");
+    this.artifacts = [];
 
-    const maxSteps = this.config.maxSteps ?? 20;
+    const maxSteps = this.config.maxSteps ?? 8;
     let steps = 0;
     let actionsBlocked = 0;
     let actionsQueued = 0;
+    const startTime = Date.now();
 
     const messages: Anthropic.MessageParam[] = [
       { role: "user", content: this.config.goal },
@@ -94,12 +118,18 @@ export class BaseAgent {
 
     try {
       while (steps < maxSteps) {
+        // Hard wall-clock timeout — never hang forever
+        if (Date.now() - startTime > AGENT_TIMEOUT_MS) {
+          this.log("Timeout — stopping after 90 s");
+          break;
+        }
+
         steps++;
         this.log(`Step ${steps}/${maxSteps}`);
 
         const response = await this.anthropic.messages.create({
           model: "claude-sonnet-4-6",
-          max_tokens: 4096,
+          max_tokens: 2048,
           system: this.buildSystemPrompt(),
           tools: this.buildClaudeTools(),
           messages,
@@ -139,9 +169,7 @@ export class BaseAgent {
         break;
       }
 
-      if (steps >= maxSteps) {
-        this.log("Max steps reached");
-      }
+      if (steps >= maxSteps) this.log("Max steps reached");
 
       // Extract plain-text summary from last assistant message
       const lastAssistant = [...messages]
@@ -156,7 +184,14 @@ export class BaseAgent {
               .join("\n") ?? "Agent completed.";
 
       await this.setStatus("idle");
-      return { success: true, stepsExecuted: steps, actionsBlocked, actionsQueued, summary };
+      return {
+        success: true,
+        stepsExecuted: steps,
+        actionsBlocked,
+        actionsQueued,
+        summary,
+        artifacts: this.artifacts,
+      };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.log(`Error: ${message}`);
@@ -167,13 +202,14 @@ export class BaseAgent {
         actionsBlocked,
         actionsQueued,
         summary: `Agent failed: ${message}`,
+        artifacts: this.artifacts,
       };
     }
   }
 
   /**
    * Runs the risk check on a tool call BEFORE executing it.
-   * Returns the string result to feed back to Claude in all three cases.
+   * Captures artifact content for note/file/post/email tools.
    */
   private async handleToolCall(toolUse: Anthropic.ToolUseBlock): Promise<{
     blocked: boolean;
@@ -223,6 +259,19 @@ export class BaseAgent {
     // execute
     try {
       const result = await tool.execute(input);
+
+      // Capture content-producing tools as visible artifacts
+      const artifactType = ARTIFACT_TOOL_MAP[tool.name];
+      if (artifactType) {
+        const title = String(
+          input.title ?? input.filename ?? input.platform ?? input.subject ?? tool.name
+        );
+        const content = String(input.content ?? input.body ?? "");
+        if (content.trim()) {
+          this.artifacts.push({ type: artifactType, title, content });
+        }
+      }
+
       return { blocked: false, queued: false, result };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -249,10 +298,12 @@ export class BaseAgent {
 Your goal: ${this.config.goal}
 
 Rules:
-- Use the tools available to you to complete the goal.
-- If a tool call is blocked or queued, acknowledge it and continue with what you can do.
-- Be concise in tool inputs — do not pass more data than needed.
-- When the goal is complete, summarise what you accomplished in plain text.`;
+- Complete the goal in as few steps as possible — 3 to 5 steps is ideal.
+- For research tasks: run 1–2 searches, read at most 2 pages, then synthesise. Do NOT keep fetching new URLs.
+- Once you have enough information to complete the goal, STOP using tools immediately and write your final answer.
+- Your final message MUST contain the complete, useful result in full — not a brief mention that a file was created.
+- If a tool call is blocked or queued, acknowledge it and continue with what you can.
+- Be concise in tool inputs; never pass more data than needed.`;
 
     return this.config.systemPrompt ? `${this.config.systemPrompt}\n\n${base}` : base;
   }

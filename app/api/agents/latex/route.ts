@@ -119,14 +119,12 @@ export async function POST(req: NextRequest) {
           })
         );
 
-        // ── Synthesis step ────────────────────────────────────────────────
-        // All agents are done. Ask Claude to merge every output into ONE
-        // clean, complete final answer for the user.
+        // ── LaTeX synthesis step ──────────────────────────────────────────
+        // All agents are done. Ask Claude to write a complete .tex paper
+        // from everything the agents produced.
         if (completedAgents.length > 0) {
           send({ type: "synthesis_start", data: {} });
 
-          // Build a compact context from all agent outputs (cap each to avoid
-          // hitting token limits).
           const agentContext = completedAgents
             .map(({ name, emoji, result }) => {
               const lines: string[] = [`## ${emoji} ${name}`, result.summary.slice(0, 2500)];
@@ -140,18 +138,29 @@ export async function POST(req: NextRequest) {
           const synthesisStream = anthropic.messages.stream({
             model: "claude-sonnet-4-6",
             max_tokens: 4096,
-            system:
-              "You are a synthesis engine. Your job is to merge the outputs of multiple AI agents into one single, complete, well-formatted answer. Present the actual content — not a description of what agents did. Remove all meta-commentary such as 'the agent created...' or 'I saved a note...'. Format in clean markdown.",
+            system: `You are an academic LaTeX paper generator. Given research gathered by multiple AI agents, you produce a complete, compilable LaTeX document.
+
+Rules — follow every one:
+1. Output ONLY raw LaTeX. No markdown, no code fences, no commentary before or after.
+2. Start the output directly with \\documentclass — no preamble text whatsoever.
+3. Use \\documentclass[12pt,a4paper]{article}.
+4. Include these packages: geometry (margin=1in), amsmath, amssymb, graphicx, booktabs, hyperref, natbib.
+5. Set author to "Anonymous" and use today's date.
+6. Include: \\begin{abstract}...\\end{abstract}, at least 4 \\section{} blocks, a \\section*{References} with \\begin{thebibliography} entries.
+7. Use \\cite{key} for in-text citations and matching \\bibitem{key} entries.
+8. Use \\textbf{}, \\textit{}, \\emph{} for emphasis; use tabular/booktabs for any tables.
+9. Every \\begin{} must have a matching \\end{}.
+10. The document must end with \\end{document}.`,
             messages: [
               {
                 role: "user",
-                content: `User's original request: "${prompt}"
+                content: `User's original research request: "${prompt}"
 
-The following agents worked on this task:
+The following agents gathered this material:
 
 ${agentContext}
 
-Synthesise all of this into ONE definitive final answer. If research findings were gathered, present them fully. If a document or comparison was requested, write it out completely. Be comprehensive.`,
+Write a complete LaTeX academic paper synthesising all of the above. Follow every rule in the system prompt exactly. Begin your output with \\documentclass — nothing before it.`,
               },
             ],
           });
@@ -169,14 +178,14 @@ Synthesise all of this into ONE definitive final answer. If research findings we
 
           send({ type: "synthesis_done", data: {} });
 
-          // Persist report with type = "research"
+          // Persist report with type = "latex"
           if (synthesisText) {
             const serviceClient = createServiceClient();
             await serviceClient.from("reports").insert({
               user_id: user.id,
               prompt,
               content: synthesisText,
-              type: "research",
+              type: "latex",
             });
           }
         }

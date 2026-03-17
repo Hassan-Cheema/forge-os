@@ -6,6 +6,7 @@ export interface Report {
   id: string;
   prompt: string;
   content: string;
+  type: "research" | "latex";
   created_at: string;
 }
 
@@ -27,7 +28,7 @@ export default async function DashboardPage({
   // Fetch reports for this user, newest first
   const { data: reports } = await supabase
     .from("reports")
-    .select("id, prompt, content, created_at")
+    .select("id, prompt, content, type, created_at")
     .eq("user_id", user.id)
     .order("created_at", { ascending: false });
 

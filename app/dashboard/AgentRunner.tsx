@@ -11,6 +11,7 @@ import type { Report } from "./page";
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type Phase = "idle" | "spawning" | "running" | "synthesizing" | "done" | "error";
+type Mode = "research" | "latex";
 
 interface AgentState extends AgentMeta {
   status: "waiting" | "running" | "done" | "failed";
@@ -20,12 +21,20 @@ interface AgentState extends AgentMeta {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const EXAMPLES = [
-  "Research the top 5 AI coding tools in 2025 and write a comparison note",
-  "Find recent news about climate tech startups and draft a tweet thread",
-  "Research best practices for remote team management and create a summary doc",
-  "Look up the latest Next.js features and draft a blog post outline",
-];
+const EXAMPLES: Record<Mode, string[]> = {
+  research: [
+    "Research the top 5 AI coding tools in 2025 and write a comparison note",
+    "Find recent news about climate tech startups and draft a tweet thread",
+    "Research best practices for remote team management and create a summary doc",
+    "Look up the latest Next.js features and draft a blog post outline",
+  ],
+  latex: [
+    "Write an academic paper on the impact of large language models on software engineering",
+    "Produce a research paper surveying recent advances in quantum computing",
+    "Write a paper on the environmental impact of data centres",
+    "Produce an academic review of reinforcement learning from human feedback",
+  ],
+};
 
 // ─── Markdown theme ───────────────────────────────────────────────────────────
 
@@ -164,16 +173,77 @@ function AgentCard({ agent }: { agent: AgentState }) {
   );
 }
 
+// ─── ModeToggle ───────────────────────────────────────────────────────────────
+
+function ModeToggle({ mode, onChange }: { mode: Mode; onChange: (m: Mode) => void }) {
+  return (
+    <div className="inline-flex rounded-lg border border-zinc-800 bg-zinc-900 p-0.5">
+      <button
+        onClick={() => onChange("research")}
+        className={`rounded-md px-3 py-1.5 text-xs font-medium transition-all ${
+          mode === "research"
+            ? "bg-white text-zinc-950 shadow-sm"
+            : "text-zinc-400 hover:text-zinc-200"
+        }`}
+      >
+        📄 Research Report
+      </button>
+      <button
+        onClick={() => onChange("latex")}
+        className={`rounded-md px-3 py-1.5 text-xs font-medium transition-all ${
+          mode === "latex"
+            ? "bg-white text-zinc-950 shadow-sm"
+            : "text-zinc-400 hover:text-zinc-200"
+        }`}
+      >
+        📐 LaTeX Paper
+      </button>
+    </div>
+  );
+}
+
+// ─── LaTeXViewer ─────────────────────────────────────────────────────────────
+
+function LaTeXViewer({ text, streaming }: { text: string; streaming: boolean }) {
+  return (
+    <div className="relative overflow-x-auto rounded-lg bg-zinc-950 px-5 py-4">
+      {streaming && (
+        <span className="absolute right-3 top-3 flex items-center gap-0.5 text-xs text-zinc-600">
+          <span className="animate-bounce">·</span>
+          <span className="animate-bounce [animation-delay:75ms]">·</span>
+          <span className="animate-bounce [animation-delay:150ms]">·</span>
+        </span>
+      )}
+      <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-zinc-300">
+        {text}
+      </pre>
+    </div>
+  );
+}
+
 // ─── ReportItem ───────────────────────────────────────────────────────────────
 
 function ReportItem({ report }: { report: Report }) {
   const [open, setOpen] = useState(false);
+  const isLatex = report.type === "latex";
 
   const date = new Date(report.created_at).toLocaleDateString(undefined, {
     month: "short",
     day: "numeric",
     year: "numeric",
   });
+
+  function download() {
+    const ext = isLatex ? "tex" : "md";
+    const mime = isLatex ? "application/x-tex" : "text/markdown";
+    const blob = new Blob([report.content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `report.${ext}`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
 
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-900 overflow-hidden transition-all">
@@ -182,7 +252,10 @@ function ReportItem({ report }: { report: Report }) {
         className="flex w-full items-start justify-between gap-3 px-4 py-3 text-left hover:bg-zinc-800/40 transition-colors"
       >
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm text-zinc-200">{report.prompt}</p>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-zinc-600">{isLatex ? "📐" : "📄"}</span>
+            <p className="truncate text-sm text-zinc-200">{report.prompt}</p>
+          </div>
           <p className="mt-0.5 text-xs text-zinc-600">{date}</p>
         </div>
         <span className="mt-0.5 shrink-0 text-xs text-zinc-500">
@@ -191,10 +264,24 @@ function ReportItem({ report }: { report: Report }) {
       </button>
 
       {open && (
-        <div className="border-t border-zinc-800 px-5 py-5">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} components={md}>
-            {report.content}
-          </ReactMarkdown>
+        <div className="border-t border-zinc-800">
+          <div className="flex justify-end gap-2 px-4 py-2 border-b border-zinc-800/60">
+            <button
+              onClick={download}
+              className="rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-400 transition-colors hover:border-zinc-500 hover:text-white"
+            >
+              ↓ {isLatex ? "Download .tex" : "Download .md"}
+            </button>
+          </div>
+          <div className="px-5 py-5">
+            {isLatex ? (
+              <LaTeXViewer text={report.content} streaming={false} />
+            ) : (
+              <ReactMarkdown remarkPlugins={[remarkGfm]} components={md}>
+                {report.content}
+              </ReactMarkdown>
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -205,12 +292,14 @@ function ReportItem({ report }: { report: Report }) {
 
 export default function AgentRunner({ reports }: { reports: Report[] }) {
   const router = useRouter();
+  const [mode, setMode] = useState<Mode>("research");
   const [phase, setPhase] = useState<Phase>("idle");
   const [prompt, setPrompt] = useState("");
   const [plan, setPlan] = useState<string | null>(null);
   const [agents, setAgents] = useState<AgentState[]>([]);
   const [synthesis, setSynthesis] = useState("");
   const [synthesisDone, setSynthesisDone] = useState(false);
+  const [activeMode, setActiveMode] = useState<Mode>("research"); // mode locked at run time
   const [showAgentDetails, setShowAgentDetails] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -226,6 +315,8 @@ export default function AgentRunner({ reports }: { reports: Report[] }) {
   async function run() {
     if (!prompt.trim() || phase === "running" || phase === "spawning") return;
 
+    const runMode = mode; // snapshot before any state updates
+
     // Reset
     setPlan(null);
     setAgents([]);
@@ -233,13 +324,16 @@ export default function AgentRunner({ reports }: { reports: Report[] }) {
     setSynthesisDone(false);
     setShowAgentDetails(false);
     setErrorMessage(null);
+    setActiveMode(runMode);
     setPhase("spawning");
 
     const ctrl = new AbortController();
     abortRef.current = ctrl;
 
+    const endpoint = runMode === "latex" ? "/api/agents/latex" : "/api/agents/run";
+
     try {
-      const res = await fetch("/api/agents/run", {
+      const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt }),
@@ -309,7 +403,7 @@ export default function AgentRunner({ reports }: { reports: Report[] }) {
 
       setPhase((p) => (p === "running" || p === "synthesizing" ? "done" : p));
 
-      // Re-fetch the server component so the new report appears in the list
+      // Re-fetch server component so the new report appears in the list
       router.refresh();
     } catch (err) {
       if ((err as Error).name === "AbortError") return;
@@ -331,11 +425,14 @@ export default function AgentRunner({ reports }: { reports: Report[] }) {
   }
 
   function downloadAnswer() {
-    const blob = new Blob([synthesis], { type: "text/plain" });
+    const isLatex = activeMode === "latex";
+    const ext = isLatex ? "tex" : "md";
+    const mime = isLatex ? "application/x-tex" : "text/plain";
+    const blob = new Blob([synthesis], { type: mime });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "answer.md";
+    a.download = `answer.${ext}`;
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -345,6 +442,7 @@ export default function AgentRunner({ reports }: { reports: Report[] }) {
   const doneCount = agents.filter((a) => a.status === "done").length;
   const failedCount = agents.filter((a) => a.status === "failed").length;
   const totalSteps = agents.reduce((s, a) => s + (a.result?.stepsExecuted ?? 0), 0);
+  const isLatexRun = activeMode === "latex";
 
   return (
     <div className="mx-auto max-w-3xl px-6 py-10">
@@ -352,7 +450,7 @@ export default function AgentRunner({ reports }: { reports: Report[] }) {
       {/* ── Prompt input ──────────────────────────────────────────────────── */}
       <div className={phase !== "idle" ? "mb-6" : "mb-0"}>
         {phase === "idle" && (
-          <div className="mb-8 text-center">
+          <div className="mb-6 text-center">
             <h1 className="text-3xl font-bold text-white">
               What should your agents do?
             </h1>
@@ -360,6 +458,10 @@ export default function AgentRunner({ reports }: { reports: Report[] }) {
               Describe any task in plain English — forge-os breaks it into agents,
               runs them in parallel, and gives you one clean answer.
             </p>
+            {/* Mode toggle — only visible in idle */}
+            <div className="mt-5 flex justify-center">
+              <ModeToggle mode={mode} onChange={setMode} />
+            </div>
           </div>
         )}
 
@@ -370,7 +472,11 @@ export default function AgentRunner({ reports }: { reports: Report[] }) {
             onKeyDown={(e) => {
               if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) run();
             }}
-            placeholder="e.g. Research the top AI tools of 2025 and write a comparison note…"
+            placeholder={
+              mode === "latex"
+                ? "e.g. Write an academic paper on the impact of LLMs on software engineering…"
+                : "e.g. Research the top AI tools of 2025 and write a comparison note…"
+            }
             rows={3}
             disabled={isActive || isSynthesizing}
             className="w-full resize-none bg-transparent text-sm text-white placeholder-zinc-500 focus:outline-none disabled:opacity-50"
@@ -399,7 +505,7 @@ export default function AgentRunner({ reports }: { reports: Report[] }) {
 
         {phase === "idle" && (
           <div className="mt-3 flex flex-wrap gap-2">
-            {EXAMPLES.map((ex) => (
+            {EXAMPLES[mode].map((ex) => (
               <button
                 key={ex}
                 onClick={() => setPrompt(ex)}
@@ -427,7 +533,6 @@ export default function AgentRunner({ reports }: { reports: Report[] }) {
       {/* ── Agent cards (shown while running) ────────────────────────────── */}
       {agents.length > 0 && (isActive || isSynthesizing || phase === "done") && (
         <div className="mb-6">
-          {/* Compact grid while running */}
           {(isActive || isSynthesizing) && (
             <>
               <div
@@ -444,7 +549,6 @@ export default function AgentRunner({ reports }: { reports: Report[] }) {
                 ))}
               </div>
 
-              {/* Progress bar — only while agents are running */}
               {isActive && (
                 <div className="mt-3">
                   <div className="mb-1 flex justify-between text-xs text-zinc-600">
@@ -471,7 +575,6 @@ export default function AgentRunner({ reports }: { reports: Report[] }) {
                 </div>
               )}
 
-              {/* Synthesising indicator */}
               {isSynthesizing && (
                 <div className="mt-3 flex items-center gap-2 text-xs text-zinc-400">
                   <span className="inline-flex gap-0.5">
@@ -479,13 +582,12 @@ export default function AgentRunner({ reports }: { reports: Report[] }) {
                     <span className="animate-bounce [animation-delay:75ms]">·</span>
                     <span className="animate-bounce [animation-delay:150ms]">·</span>
                   </span>
-                  Synthesising answer…
+                  {isLatexRun ? "Composing LaTeX paper…" : "Synthesising answer…"}
                 </div>
               )}
             </>
           )}
 
-          {/* Collapsed detail row after done */}
           {phase === "done" && (
             <button
               onClick={() => setShowAgentDetails((v) => !v)}
@@ -505,7 +607,6 @@ export default function AgentRunner({ reports }: { reports: Report[] }) {
             </button>
           )}
 
-          {/* Expanded agent details */}
           {phase === "done" && showAgentDetails && (
             <div className="mt-2 space-y-2">
               {plan && (
@@ -534,14 +635,15 @@ export default function AgentRunner({ reports }: { reports: Report[] }) {
         </div>
       )}
 
-      {/* ── Synthesis / Answer panel ──────────────────────────────────────── */}
+      {/* ── Answer / LaTeX panel ──────────────────────────────────────────── */}
       {synthesis && (
         <div className="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900">
-          {/* Header */}
           <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
             <div className="flex items-center gap-2">
-              <span className="text-base">✨</span>
-              <p className="text-sm font-semibold text-white">Answer</p>
+              <span className="text-base">{isLatexRun ? "📐" : "✨"}</span>
+              <p className="text-sm font-semibold text-white">
+                {isLatexRun ? "LaTeX Paper" : "Answer"}
+              </p>
               {!synthesisDone && (
                 <span className="flex items-center gap-0.5 text-xs text-zinc-500">
                   <span className="animate-bounce">·</span>
@@ -556,21 +658,21 @@ export default function AgentRunner({ reports }: { reports: Report[] }) {
                   onClick={downloadAnswer}
                   className="rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-400 transition-colors hover:border-zinc-500 hover:text-white"
                 >
-                  ↓ Download
+                  ↓ {isLatexRun ? "Download .tex" : "Download .md"}
                 </button>
                 <CopyButton text={synthesis} />
               </div>
             )}
           </div>
 
-          {/* Content */}
           <div className="px-5 py-5">
-            {synthesisDone ? (
+            {isLatexRun ? (
+              <LaTeXViewer text={synthesis} streaming={!synthesisDone} />
+            ) : synthesisDone ? (
               <ReactMarkdown remarkPlugins={[remarkGfm]} components={md}>
                 {synthesis}
               </ReactMarkdown>
             ) : (
-              /* While streaming: plain text for speed, no re-parsing flicker */
               <p className="whitespace-pre-wrap text-sm leading-relaxed text-zinc-300">
                 {synthesis}
               </p>

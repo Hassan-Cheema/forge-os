@@ -1,373 +1,218 @@
-"use client";
-import { useState, useEffect, useRef, useCallback } from "react";
+import Link from "next/link";
 
-const USER_ID = "test-user-001";
+const features = [
+  {
+    icon: "🔍",
+    title: "Real-time search",
+    description:
+      "Give your agents live web data via DuckDuckGo. No API key required — just call /api/search?q=your+query.",
+  },
+  {
+    icon: "🔐",
+    title: "Auth out of the box",
+    description:
+      "Supabase-powered login and signup. Email confirmation, session management, and protected routes — all wired up.",
+  },
+  {
+    icon: "💳",
+    title: "Built-in payments",
+    description:
+      "Stripe subscriptions ready to go. Drop in your price ID and start collecting recurring revenue immediately.",
+  },
+];
 
-interface Agent {
-  id: string;
-  name: string;
-  goal: string;
-  emoji: string;
-  status: "idle" | "running" | "paused" | "error";
-}
+const plans = [
+  {
+    name: "Starter",
+    price: "$0",
+    period: "forever",
+    description: "For hobbyists and side projects",
+    features: ["1 agent", "100 searches/month", "Community support"],
+    priceId: null,
+    cta: "Get started",
+  },
+  {
+    name: "Pro",
+    price: "$29",
+    period: "/month",
+    description: "For teams shipping production agents",
+    features: ["Unlimited agents", "10,000 searches/month", "Priority support", "Webhooks"],
+    priceId: process.env.NEXT_PUBLIC_STRIPE_PRO_PRICE_ID,
+    cta: "Start free trial",
+    highlighted: true,
+  },
+  {
+    name: "Enterprise",
+    price: "Custom",
+    period: "",
+    description: "For large-scale deployments",
+    features: ["Unlimited everything", "SLA guarantee", "Dedicated support", "Custom contracts"],
+    priceId: null,
+    cta: "Contact us",
+  },
+];
 
-interface Approval {
-  id: string;
-  agent_id: string;
-  category: string;
-  tool: string;
-  description: string;
-  risk_score: number;
-  risk_reason: string;
-  payload: Record<string, unknown>;
-  created_at: string;
-}
-
-const STATUS_STYLES: Record<string, string> = {
-  idle: "bg-gray-50 text-gray-400",
-  running: "bg-blue-50 text-blue-500",
-  paused: "bg-yellow-50 text-yellow-600",
-  error: "bg-red-50 text-red-500",
-};
-
-const STATUS_DOT: Record<string, string> = {
-  idle: "bg-gray-300",
-  running: "bg-blue-400 animate-pulse",
-  paused: "bg-yellow-400",
-  error: "bg-red-400",
-};
-
-const RISK_COLOR = (score: number) => {
-  if (score <= 3) return "text-green-600 bg-green-50";
-  if (score <= 6) return "text-yellow-600 bg-yellow-50";
-  return "text-red-600 bg-red-50";
-};
-
-export default function Home() {
-  const [prompt, setPrompt] = useState("");
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [plan, setPlan] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [approvals, setApprovals] = useState<Approval[]>([]);
-  const [resolvingId, setResolvingId] = useState<string | null>(null);
-  const [error, setError] = useState("");
-
-  const agentIdsRef = useRef<string[]>([]);
-  const pollingRef = useRef<NodeJS.Timeout | null>(null);
-
-  // Poll agent statuses
-  const pollStatuses = useCallback(async () => {
-    if (agentIdsRef.current.length === 0) return;
-    try {
-      const ids = agentIdsRef.current.join(",");
-      const res = await fetch(`/api/agents/status?userId=${USER_ID}&ids=${ids}`);
-      if (!res.ok) return;
-      const data = await res.json();
-      if (data.agents?.length) {
-        setAgents((prev) =>
-          prev.map((a) => {
-            const fresh = data.agents.find((f: Agent) => f.id === a.id);
-            return fresh ? { ...a, status: fresh.status } : a;
-          })
-        );
-        // Stop polling when all agents are done
-        const allDone = data.agents.every(
-          (a: Agent) => a.status === "idle" || a.status === "error"
-        );
-        if (allDone) stopPolling();
-      }
-    } catch { /* ignore polling errors */ }
-  }, []);
-
-  // Poll approvals
-  const pollApprovals = useCallback(async () => {
-    try {
-      const res = await fetch(`/api/agents/approvals?userId=${USER_ID}`);
-      if (!res.ok) return;
-      const data = await res.json();
-      setApprovals(data.approvals ?? []);
-    } catch { /* ignore */ }
-  }, []);
-
-  const startPolling = useCallback(() => {
-    if (pollingRef.current) return;
-    pollingRef.current = setInterval(() => {
-      pollStatuses();
-      pollApprovals();
-    }, 3000);
-  }, [pollStatuses, pollApprovals]);
-
-  const stopPolling = useCallback(() => {
-    if (pollingRef.current) {
-      clearInterval(pollingRef.current);
-      pollingRef.current = null;
-    }
-  }, []);
-
-  useEffect(() => () => stopPolling(), [stopPolling]);
-
-  async function handleSubmit() {
-    if (!prompt.trim()) return;
-    setLoading(true);
-    setError("");
-    setAgents([]);
-    setPlan("");
-    setApprovals([]);
-    stopPolling();
-
-    try {
-      const res = await fetch("/api/agents/spawn", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt, userId: USER_ID }),
-      });
-
-      const data = await res.json();
-
-      if (!res.ok || data.error) {
-        setError(data.error ?? "Failed to spawn agents.");
-        return;
-      }
-
-      const spawnedAgents: Agent[] = (data.agents ?? []).map((a: Agent) => ({
-        ...a,
-        status: "running" as const,
-      }));
-
-      setAgents(spawnedAgents);
-      setPlan(data.plan ?? "");
-      agentIdsRef.current = spawnedAgents.map((a) => a.id);
-      startPolling();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unexpected error.");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function resolveApproval(id: string, action: "approve" | "reject") {
-    setResolvingId(id);
-    try {
-      await fetch("/api/agents/approvals", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id, action }),
-      });
-      setApprovals((prev) => prev.filter((a) => a.id !== id));
-    } finally {
-      setResolvingId(null);
-    }
-  }
-
-  function handleReset() {
-    stopPolling();
-    setAgents([]);
-    setPlan("");
-    setPrompt("");
-    setApprovals([]);
-    setError("");
-    agentIdsRef.current = [];
-  }
-
-  const allDone = agents.length > 0 && agents.every((a) => a.status === "idle" || a.status === "error");
-  const anyRunning = agents.some((a) => a.status === "running");
-
+export default function LandingPage() {
   return (
-    <main className="min-h-screen bg-[#fafafa] flex flex-col items-center justify-start pt-20 px-6 pb-20">
-
-      {/* Header */}
-      <div className="mb-12 text-center">
-        <div className="inline-flex items-center gap-2 bg-white border border-gray-100 rounded-full px-4 py-1.5 text-xs text-gray-400 mb-6 shadow-sm">
-          <span className={`w-1.5 h-1.5 rounded-full ${anyRunning ? "bg-blue-400 animate-pulse" : "bg-green-400"}`} />
-          {anyRunning ? "Agents running..." : "System operational"}
-        </div>
-        <h1 className="text-5xl font-bold tracking-tight text-gray-900 mb-3">
-          FORGE OS
-        </h1>
-        <p className="text-gray-400 text-base">
-          Type a goal. Your AI team handles everything.
-        </p>
-      </div>
-
-      {/* Prompt box */}
-      <div className="w-full max-w-xl">
-        <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
-          <textarea
-            className="w-full p-5 text-sm text-gray-800 resize-none focus:outline-none bg-transparent placeholder-gray-300"
-            placeholder="e.g. Help me launch my SaaS this week..."
-            rows={4}
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && e.metaKey) handleSubmit();
-            }}
-          />
-          <div className="flex items-center justify-between px-5 py-3 border-t border-gray-50">
-            <span className="text-xs text-gray-300">⌘ + Enter to run</span>
-            <button
-              onClick={handleSubmit}
-              disabled={loading || !prompt.trim()}
-              className="bg-black text-white text-xs font-medium px-5 py-2 rounded-full hover:bg-gray-800 disabled:opacity-30 transition-all"
+    <div className="min-h-screen bg-zinc-950 text-white">
+      {/* Nav */}
+      <nav className="border-b border-zinc-900 px-6 py-4">
+        <div className="mx-auto flex max-w-5xl items-center justify-between">
+          <span className="text-lg font-semibold tracking-tight">forge-os</span>
+          <div className="flex items-center gap-4">
+            <Link href="/auth/login" className="text-sm text-zinc-400 hover:text-white transition-colors">
+              Sign in
+            </Link>
+            <Link
+              href="/auth/signup"
+              className="rounded-lg bg-white px-4 py-1.5 text-sm font-medium text-zinc-950 hover:bg-zinc-100 transition-colors"
             >
-              {loading ? "Spawning..." : "Launch agents →"}
-            </button>
+              Get started
+            </Link>
           </div>
         </div>
+      </nav>
 
-        {/* Example prompts */}
-        {agents.length === 0 && !loading && (
-          <div className="flex flex-wrap gap-2 mt-4 justify-center">
-            {[
-              "Research my top 3 competitors",
-              "Draft a cold outreach email campaign",
-              "Plan my product launch for next week",
-              "Write landing page copy for my SaaS",
-            ].map((example) => (
-              <button
-                key={example}
-                onClick={() => setPrompt(example)}
-                className="text-xs text-gray-400 border border-gray-100 bg-white rounded-full px-3 py-1.5 hover:border-gray-300 hover:text-gray-600 transition-all"
-              >
-                {example}
-              </button>
-            ))}
+      {/* Hero */}
+      <section className="px-6 py-32 text-center">
+        <div className="mx-auto max-w-3xl">
+          <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-zinc-800 bg-zinc-900 px-4 py-1.5 text-xs text-zinc-400">
+            <span className="h-1.5 w-1.5 rounded-full bg-green-400"></span>
+            Now in beta — free to get started
           </div>
-        )}
-      </div>
-
-      {/* Error */}
-      {error && (
-        <div className="mt-6 w-full max-w-xl bg-red-50 border border-red-100 rounded-2xl p-4 text-xs text-red-600">
-          {error}
+          <h1 className="text-5xl font-bold tracking-tight leading-tight sm:text-6xl">
+            Build AI agents
+            <br />
+            <span className="text-zinc-400">that actually ship</span>
+          </h1>
+          <p className="mx-auto mt-6 max-w-xl text-lg text-zinc-400 leading-relaxed">
+            forge-os gives your agents real-time search, user authentication, and payments — everything wired up so you can skip the boilerplate.
+          </p>
+          <div className="mt-10 flex flex-col items-center gap-3 sm:flex-row sm:justify-center">
+            <Link
+              href="/auth/signup"
+              className="rounded-lg bg-white px-6 py-3 text-sm font-semibold text-zinc-950 hover:bg-zinc-100 transition-colors"
+            >
+              Start building for free
+            </Link>
+            <Link
+              href="#features"
+              className="rounded-lg border border-zinc-800 px-6 py-3 text-sm font-medium text-zinc-300 hover:border-zinc-700 hover:text-white transition-colors"
+            >
+              See how it works
+            </Link>
+          </div>
         </div>
-      )}
+      </section>
 
-      {/* Loading state */}
-      {loading && (
-        <div className="mt-12 flex flex-col items-center gap-3">
-          <div className="flex gap-1.5">
-            {[0, 1, 2].map((i) => (
+      {/* Features */}
+      <section id="features" className="border-t border-zinc-900 px-6 py-24">
+        <div className="mx-auto max-w-5xl">
+          <h2 className="mb-12 text-center text-3xl font-bold">Everything your agent needs</h2>
+          <div className="grid gap-6 sm:grid-cols-3">
+            {features.map((f) => (
               <div
-                key={i}
-                className="w-2 h-2 rounded-full bg-gray-300 animate-bounce"
-                style={{ animationDelay: `${i * 0.15}s` }}
-              />
+                key={f.title}
+                className="rounded-xl border border-zinc-800 bg-zinc-900 p-6 hover:border-zinc-700 transition-colors"
+              >
+                <div className="mb-4 text-3xl">{f.icon}</div>
+                <h3 className="mb-2 text-base font-semibold">{f.title}</h3>
+                <p className="text-sm text-zinc-400 leading-relaxed">{f.description}</p>
+              </div>
             ))}
           </div>
-          <p className="text-xs text-gray-400">Decomposing goal into agents...</p>
         </div>
-      )}
+      </section>
 
-      {/* Results */}
-      {agents.length > 0 && (
-        <div className="w-full max-w-xl mt-10">
-
-          {/* Plan summary */}
-          {plan && (
-            <p className="text-xs text-gray-400 text-center mb-6 leading-relaxed px-4">
-              {plan}
+      {/* Search demo hint */}
+      <section className="border-t border-zinc-900 px-6 py-20">
+        <div className="mx-auto max-w-3xl">
+          <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-8">
+            <p className="mb-3 text-xs font-mono text-zinc-500">GET /api/search?q=latest+AI+research</p>
+            <pre className="overflow-x-auto rounded-lg bg-zinc-950 p-4 text-xs text-zinc-300 leading-relaxed">
+{`{
+  "query": "latest AI research",
+  "abstract": "Artificial intelligence research encompasses...",
+  "relatedTopics": [
+    { "text": "Large language models", "url": "..." },
+    { "text": "Reinforcement learning", "url": "..." }
+  ]
+}`}
+            </pre>
+            <p className="mt-4 text-sm text-zinc-400">
+              One endpoint. Live DuckDuckGo data. No API key needed.
             </p>
-          )}
-
-          {/* Status legend */}
-          <div className="flex items-center justify-between mb-3 px-1">
-            <p className="text-xs text-gray-400 font-medium">{agents.length} agents deployed</p>
-            {allDone && (
-              <span className="text-xs text-green-600 font-medium">All done ✓</span>
-            )}
-            {anyRunning && (
-              <span className="text-xs text-blue-500">Live updates every 3s</span>
-            )}
           </div>
+        </div>
+      </section>
 
-          {/* Agent cards */}
-          <div className="flex flex-col gap-3">
-            {agents.map((agent, i) => (
+      {/* Pricing */}
+      <section id="pricing" className="border-t border-zinc-900 px-6 py-24">
+        <div className="mx-auto max-w-5xl">
+          <h2 className="mb-4 text-center text-3xl font-bold">Simple pricing</h2>
+          <p className="mb-12 text-center text-zinc-400">Start free. Upgrade when you need more.</p>
+          <div className="grid gap-6 sm:grid-cols-3">
+            {plans.map((plan) => (
               <div
-                key={agent.id}
-                className="bg-white border border-gray-100 rounded-2xl p-4 flex items-start gap-4 shadow-sm"
-                style={{ animationDelay: `${i * 0.1}s` }}
+                key={plan.name}
+                className={`rounded-xl border p-6 ${
+                  plan.highlighted
+                    ? "border-white bg-white text-zinc-950"
+                    : "border-zinc-800 bg-zinc-900"
+                }`}
               >
-                <div className="w-10 h-10 rounded-xl bg-gray-50 flex items-center justify-center text-xl flex-shrink-0">
-                  {agent.emoji}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between mb-1">
-                    <p className="text-sm font-medium text-gray-900">{agent.name}</p>
-                    <span className={`text-xs px-2 py-0.5 rounded-full flex-shrink-0 ml-2 flex items-center gap-1.5 ${STATUS_STYLES[agent.status] ?? STATUS_STYLES.idle}`}>
-                      <span className={`w-1.5 h-1.5 rounded-full ${STATUS_DOT[agent.status] ?? STATUS_DOT.idle}`} />
-                      {agent.status}
-                    </span>
-                  </div>
-                  <p className="text-xs text-gray-400 leading-relaxed">
-                    {agent.goal}
+                <div className="mb-4">
+                  <p className={`text-sm font-medium ${plan.highlighted ? "text-zinc-600" : "text-zinc-400"}`}>
+                    {plan.name}
+                  </p>
+                  <p className="mt-1 text-3xl font-bold">
+                    {plan.price}
+                    {plan.period && (
+                      <span className={`text-base font-normal ${plan.highlighted ? "text-zinc-500" : "text-zinc-500"}`}>
+                        {plan.period}
+                      </span>
+                    )}
+                  </p>
+                  <p className={`mt-1 text-sm ${plan.highlighted ? "text-zinc-600" : "text-zinc-400"}`}>
+                    {plan.description}
                   </p>
                 </div>
+
+                <ul className="mb-6 space-y-2">
+                  {plan.features.map((feat) => (
+                    <li
+                      key={feat}
+                      className={`flex items-center gap-2 text-sm ${plan.highlighted ? "text-zinc-700" : "text-zinc-300"}`}
+                    >
+                      <span className={plan.highlighted ? "text-zinc-900" : "text-zinc-400"}>✓</span>
+                      {feat}
+                    </li>
+                  ))}
+                </ul>
+
+                <Link
+                  href="/auth/signup"
+                  className={`block w-full rounded-lg px-4 py-2.5 text-center text-sm font-medium transition-colors ${
+                    plan.highlighted
+                      ? "bg-zinc-950 text-white hover:bg-zinc-800"
+                      : "border border-zinc-700 text-zinc-300 hover:border-zinc-600 hover:text-white"
+                  }`}
+                >
+                  {plan.cta}
+                </Link>
               </div>
             ))}
           </div>
-
-          {/* Pending approvals */}
-          {approvals.length > 0 && (
-            <div className="mt-8">
-              <div className="flex items-center gap-2 mb-3">
-                <div className="w-2 h-2 rounded-full bg-yellow-400 animate-pulse" />
-                <p className="text-xs font-medium text-gray-700">
-                  {approvals.length} action{approvals.length !== 1 ? "s" : ""} waiting for approval
-                </p>
-              </div>
-              <div className="flex flex-col gap-3">
-                {approvals.map((approval) => (
-                  <div key={approval.id} className="bg-white border border-yellow-100 rounded-2xl p-4 shadow-sm">
-                    <div className="flex items-start justify-between gap-3 mb-2">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${RISK_COLOR(approval.risk_score ?? 0)}`}>
-                            Risk {approval.risk_score}/10
-                          </span>
-                          <span className="text-xs text-gray-400">{approval.tool}</span>
-                        </div>
-                        <p className="text-sm text-gray-800 font-medium leading-snug">
-                          {approval.description}
-                        </p>
-                        {approval.risk_reason && (
-                          <p className="text-xs text-gray-400 mt-1 leading-relaxed">
-                            {approval.risk_reason}
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                    <div className="flex gap-2 mt-3">
-                      <button
-                        onClick={() => resolveApproval(approval.id, "approve")}
-                        disabled={resolvingId === approval.id}
-                        className="flex-1 text-xs font-medium py-2 rounded-xl bg-black text-white hover:bg-gray-800 disabled:opacity-40 transition-all"
-                      >
-                        Approve
-                      </button>
-                      <button
-                        onClick={() => resolveApproval(approval.id, "reject")}
-                        disabled={resolvingId === approval.id}
-                        className="flex-1 text-xs font-medium py-2 rounded-xl bg-gray-50 text-gray-600 hover:bg-gray-100 disabled:opacity-40 transition-all border border-gray-100"
-                      >
-                        Reject
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Reset */}
-          <button
-            onClick={handleReset}
-            className="mt-8 w-full text-xs text-gray-300 hover:text-gray-500 py-3 transition-all"
-          >
-            ← Start over
-          </button>
         </div>
-      )}
-    </main>
+      </section>
+
+      {/* Footer */}
+      <footer className="border-t border-zinc-900 px-6 py-10">
+        <div className="mx-auto max-w-5xl flex flex-col items-center justify-between gap-4 text-sm text-zinc-500 sm:flex-row">
+          <span className="font-medium text-zinc-400">forge-os</span>
+          <span>Built with Next.js · Supabase · Stripe</span>
+        </div>
+      </footer>
+    </div>
   );
 }

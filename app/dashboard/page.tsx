@@ -35,20 +35,18 @@ export default async function DashboardPage() {
   return (
     <div className="min-h-screen bg-zinc-950 text-white">
       {/* Nav */}
-      <nav className="border-b border-zinc-900 px-6 py-4">
-        <div className="mx-auto flex max-w-4xl items-center justify-between">
-          <span className="text-lg font-semibold tracking-tight">forge-os</span>
-          <div className="flex items-center gap-4">
-            <span className="hidden text-xs text-zinc-500 sm:block">{user.email}</span>
-            <form action={signOut}>
-              <button
-                type="submit"
-                className="text-sm text-zinc-400 transition-colors hover:text-white"
-              >
-                Sign out
-              </button>
-            </form>
-          </div>
+      <nav className="flex items-center justify-between border-b border-zinc-900 px-6 py-4">
+        <span className="text-lg font-semibold tracking-tight">forge-os</span>
+        <div className="flex items-center gap-4">
+          <span className="hidden text-xs text-zinc-500 sm:block">{user.email}</span>
+          <form action={signOut}>
+            <button
+              type="submit"
+              className="text-sm text-zinc-400 transition-colors hover:text-white"
+            >
+              Sign out
+            </button>
+          </form>
         </div>
       </nav>
 

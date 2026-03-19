@@ -31,20 +31,18 @@ export default function LandingPage() {
   return (
     <div className="min-h-screen bg-zinc-950 text-white">
       {/* Nav */}
-      <nav className="border-b border-zinc-900 px-6 py-4">
-        <div className="mx-auto flex max-w-5xl items-center justify-between">
-          <span className="text-lg font-semibold tracking-tight">forge-os</span>
-          <div className="flex items-center gap-4">
-            <Link href="/auth/login" className="text-sm text-zinc-400 hover:text-white transition-colors">
-              Sign in
-            </Link>
-            <Link
-              href="/auth/signup"
-              className="rounded-lg bg-white px-4 py-1.5 text-sm font-medium text-zinc-950 hover:bg-zinc-100 transition-colors"
-            >
-              Get started
-            </Link>
-          </div>
+      <nav className="flex items-center justify-between border-b border-zinc-900 px-6 py-4">
+        <span className="text-lg font-semibold tracking-tight">forge-os</span>
+        <div className="flex items-center gap-4">
+          <Link href="/auth/login" className="text-sm text-zinc-400 hover:text-white transition-colors">
+            Sign in
+          </Link>
+          <Link
+            href="/auth/signup"
+            className="rounded-lg bg-white px-4 py-1.5 text-sm font-medium text-zinc-950 hover:bg-zinc-100 transition-colors"
+          >
+            Get started
+          </Link>
         </div>
       </nav>
 
@@ -159,11 +157,9 @@ export default function LandingPage() {
       </section>
 
       {/* Footer */}
-      <footer className="border-t border-zinc-900 px-6 py-10">
-        <div className="mx-auto max-w-5xl flex flex-col items-center justify-between gap-4 text-sm text-zinc-500 sm:flex-row">
-          <span className="font-medium text-zinc-400">forge-os</span>
-          <span>Built with Next.js · Supabase · Claude</span>
-        </div>
+      <footer className="flex flex-col items-center justify-between gap-4 border-t border-zinc-900 px-6 py-10 text-sm text-zinc-500 sm:flex-row">
+        <span className="font-medium text-zinc-400">forge-os</span>
+        <span>Built with Next.js · Supabase · Claude</span>
       </footer>
     </div>
   );

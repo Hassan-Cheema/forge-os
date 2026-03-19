@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -17,6 +17,16 @@ interface AgentState extends AgentMeta {
   status: "waiting" | "running" | "done" | "failed";
   result?: AgentResult;
   errorMessage?: string;
+}
+
+interface PendingApproval {
+  id: string;
+  tool_name: string;
+  category: string;
+  description: string | null;
+  risk_score: number;
+  risk_reason: string | null;
+  created_at: string;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -221,6 +231,109 @@ function LaTeXViewer({ text, streaming }: { text: string; streaming: boolean }) 
   );
 }
 
+// ─── PendingApprovals ─────────────────────────────────────────────────────────
+
+function PendingApprovals({ active }: { active: boolean }) {
+  const [approvals, setApprovals] = useState<PendingApproval[]>([]);
+  const [resolving, setResolving] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (!active) {
+      setApprovals([]);
+      return;
+    }
+
+    async function poll() {
+      const res = await fetch("/api/agents/approvals");
+      if (res.ok) {
+        const data = await res.json();
+        setApprovals(data.approvals ?? []);
+      }
+    }
+
+    poll();
+    const interval = setInterval(poll, 3000);
+    return () => clearInterval(interval);
+  }, [active]);
+
+  async function resolve(id: string, action: "approve" | "reject") {
+    setResolving((prev) => new Set(prev).add(id));
+    await fetch("/api/agents/approvals", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, action }),
+    });
+    setApprovals((prev) => prev.filter((a) => a.id !== id));
+    setResolving((prev) => {
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  }
+
+  if (approvals.length === 0) return null;
+
+  return (
+    <div className="mb-6 rounded-xl border border-yellow-900/60 bg-yellow-950/20 p-4">
+      <div className="mb-3 flex items-center gap-2">
+        <span className="relative inline-flex h-2 w-2">
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-yellow-400 opacity-75" />
+          <span className="relative inline-flex h-2 w-2 rounded-full bg-yellow-500" />
+        </span>
+        <p className="text-xs font-semibold uppercase tracking-widest text-yellow-600">
+          Pending approvals ({approvals.length})
+        </p>
+      </div>
+      <div className="space-y-2">
+        {approvals.map((a) => (
+          <div
+            key={a.id}
+            className="rounded-lg border border-yellow-900/40 bg-yellow-950/30 p-3"
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="rounded bg-yellow-900/50 px-1.5 py-0.5 font-mono text-[10px] text-yellow-400">
+                    {a.tool_name}
+                  </span>
+                  <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">
+                    {a.category}
+                  </span>
+                  <span className="text-[10px] text-yellow-700 font-medium">
+                    risk {a.risk_score}/10
+                  </span>
+                </div>
+                {a.description && (
+                  <p className="mt-1.5 text-xs text-zinc-300 leading-relaxed">{a.description}</p>
+                )}
+                {a.risk_reason && (
+                  <p className="mt-1 text-[10px] text-zinc-500 italic">{a.risk_reason}</p>
+                )}
+              </div>
+              <div className="flex shrink-0 gap-1.5">
+                <button
+                  onClick={() => resolve(a.id, "approve")}
+                  disabled={resolving.has(a.id)}
+                  className="rounded-md border border-green-800 bg-green-950/40 px-2.5 py-1 text-xs font-medium text-green-400 transition-colors hover:bg-green-900/40 disabled:opacity-40"
+                >
+                  Approve
+                </button>
+                <button
+                  onClick={() => resolve(a.id, "reject")}
+                  disabled={resolving.has(a.id)}
+                  className="rounded-md border border-red-900 bg-red-950/40 px-2.5 py-1 text-xs font-medium text-red-400 transition-colors hover:bg-red-900/40 disabled:opacity-40"
+                >
+                  Reject
+                </button>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ─── ReportItem ───────────────────────────────────────────────────────────────
 
 function ReportItem({ report }: { report: Report }) {
@@ -288,9 +401,36 @@ function ReportItem({ report }: { report: Report }) {
   );
 }
 
+// ─── CopyButton ───────────────────────────────────────────────────────────────
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      onClick={() =>
+        navigator.clipboard.writeText(text).then(() => {
+          setCopied(true);
+          setTimeout(() => setCopied(false), 2000);
+        })
+      }
+      className="rounded-md border border-zinc-700 px-2.5 py-1 text-xs transition-colors hover:border-zinc-500 hover:text-white"
+      style={{ color: copied ? "#4ade80" : undefined }}
+    >
+      {copied ? "✓ Copied" : "Copy"}
+    </button>
+  );
+}
+
 // ─── Main component ───────────────────────────────────────────────────────────
 
-export default function AgentRunner({ reports }: { reports: Report[] }) {
+export default function AgentRunner({
+  userId,
+  reports,
+}: {
+  userId: string;
+  reports: Report[];
+}) {
+  void userId; // used by PendingApprovals via API auth (cookie-based)
   const router = useRouter();
   const [mode, setMode] = useState<Mode>("research");
   const [phase, setPhase] = useState<Phase>("idle");
@@ -299,7 +439,7 @@ export default function AgentRunner({ reports }: { reports: Report[] }) {
   const [agents, setAgents] = useState<AgentState[]>([]);
   const [synthesis, setSynthesis] = useState("");
   const [synthesisDone, setSynthesisDone] = useState(false);
-  const [activeMode, setActiveMode] = useState<Mode>("research"); // mode locked at run time
+  const [activeMode, setActiveMode] = useState<Mode>("research");
   const [showAgentDetails, setShowAgentDetails] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -315,9 +455,8 @@ export default function AgentRunner({ reports }: { reports: Report[] }) {
   async function run() {
     if (!prompt.trim() || phase === "running" || phase === "spawning") return;
 
-    const runMode = mode; // snapshot before any state updates
+    const runMode = mode;
 
-    // Reset
     setPlan(null);
     setAgents([]);
     setSynthesis("");
@@ -402,8 +541,6 @@ export default function AgentRunner({ reports }: { reports: Report[] }) {
       }
 
       setPhase((p) => (p === "running" || p === "synthesizing" ? "done" : p));
-
-      // Re-fetch server component so the new report appears in the list
       router.refresh();
     } catch (err) {
       if ((err as Error).name === "AbortError") return;
@@ -443,6 +580,7 @@ export default function AgentRunner({ reports }: { reports: Report[] }) {
   const failedCount = agents.filter((a) => a.status === "failed").length;
   const totalSteps = agents.reduce((s, a) => s + (a.result?.stepsExecuted ?? 0), 0);
   const isLatexRun = activeMode === "latex";
+  const approvalsActive = isActive || isSynthesizing;
 
   return (
     <div className="mx-auto max-w-3xl px-6 py-10">
@@ -458,7 +596,6 @@ export default function AgentRunner({ reports }: { reports: Report[] }) {
               Describe any task in plain English — forge-os breaks it into agents,
               runs them in parallel, and gives you one clean answer.
             </p>
-            {/* Mode toggle — only visible in idle */}
             <div className="mt-5 flex justify-center">
               <ModeToggle mode={mode} onChange={setMode} />
             </div>
@@ -530,7 +667,10 @@ export default function AgentRunner({ reports }: { reports: Report[] }) {
         </div>
       )}
 
-      {/* ── Agent cards (shown while running) ────────────────────────────── */}
+      {/* ── Pending approvals ─────────────────────────────────────────────── */}
+      <PendingApprovals active={approvalsActive} />
+
+      {/* ── Agent cards ───────────────────────────────────────────────────── */}
       {agents.length > 0 && (isActive || isSynthesizing || phase === "done") && (
         <div className="mb-6">
           {(isActive || isSynthesizing) && (
@@ -681,7 +821,7 @@ export default function AgentRunner({ reports }: { reports: Report[] }) {
         </div>
       )}
 
-      {/* ── Done bar ─────────────────────────────────────────────────────── */}
+      {/* ── Done bar ──────────────────────────────────────────────────────── */}
       {phase === "done" && synthesis && (
         <div className="mt-4 flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-900/50 px-4 py-3">
           <p className="text-xs text-zinc-500">
@@ -696,7 +836,7 @@ export default function AgentRunner({ reports }: { reports: Report[] }) {
         </div>
       )}
 
-      {/* ── Error ────────────────────────────────────────────────────────── */}
+      {/* ── Error ─────────────────────────────────────────────────────────── */}
       {phase === "error" && errorMessage && (
         <div className="rounded-xl border border-red-900 bg-red-950/40 px-5 py-4">
           <p className="text-sm font-medium text-red-400">Something went wrong</p>
@@ -704,7 +844,7 @@ export default function AgentRunner({ reports }: { reports: Report[] }) {
         </div>
       )}
 
-      {/* ── Past reports ─────────────────────────────────────────────────── */}
+      {/* ── Past reports ──────────────────────────────────────────────────── */}
       {reports.length > 0 && phase === "idle" && (
         <div className="mt-12">
           <h2 className="mb-3 text-xs font-semibold uppercase tracking-widest text-zinc-600">
@@ -718,25 +858,5 @@ export default function AgentRunner({ reports }: { reports: Report[] }) {
         </div>
       )}
     </div>
-  );
-}
-
-// ─── CopyButton ───────────────────────────────────────────────────────────────
-
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <button
-      onClick={() =>
-        navigator.clipboard.writeText(text).then(() => {
-          setCopied(true);
-          setTimeout(() => setCopied(false), 2000);
-        })
-      }
-      className="rounded-md border border-zinc-700 px-2.5 py-1 text-xs transition-colors hover:border-zinc-500 hover:text-white"
-      style={{ color: copied ? "#4ade80" : undefined }}
-    >
-      {copied ? "✓ Copied" : "Copy"}
-    </button>
   );
 }

@@ -2,53 +2,28 @@ import Link from "next/link";
 
 const features = [
   {
-    icon: "🔍",
-    title: "Real-time search",
+    icon: "🤖",
+    title: "Multi-agent intelligence",
     description:
-      "Give your agents live web data via DuckDuckGo. No API key required — just call /api/search?q=your+query.",
+      "Describe any task in plain English. forge-os decomposes it into a team of specialist agents that run in parallel, then synthesises one clean answer.",
+  },
+  {
+    icon: "🔍",
+    title: "Real-time web search",
+    description:
+      "Agents get live DuckDuckGo results on every run. No API key required — just call /api/search?q=your+query from anywhere in your app.",
   },
   {
     icon: "🔐",
     title: "Auth out of the box",
     description:
-      "Supabase-powered login and signup. Email confirmation, session management, and protected routes — all wired up.",
+      "Supabase-powered login and signup. Email confirmation, Google OAuth, session management, and protected routes — all wired up and ready.",
   },
   {
-    icon: "💳",
-    title: "Built-in payments",
+    icon: "🛡️",
+    title: "Risk-based approvals",
     description:
-      "Stripe subscriptions ready to go. Drop in your price ID and start collecting recurring revenue immediately.",
-  },
-];
-
-const plans = [
-  {
-    name: "Starter",
-    price: "$0",
-    period: "forever",
-    description: "For hobbyists and side projects",
-    features: ["1 agent", "100 searches/month", "Community support"],
-    priceId: null,
-    cta: "Get started",
-  },
-  {
-    name: "Pro",
-    price: "$29",
-    period: "/month",
-    description: "For teams shipping production agents",
-    features: ["Unlimited agents", "10,000 searches/month", "Priority support", "Webhooks"],
-    priceId: process.env.NEXT_PUBLIC_STRIPE_PRO_PRICE_ID,
-    cta: "Start free trial",
-    highlighted: true,
-  },
-  {
-    name: "Enterprise",
-    price: "Custom",
-    period: "",
-    description: "For large-scale deployments",
-    features: ["Unlimited everything", "SLA guarantee", "Dedicated support", "Custom contracts"],
-    priceId: null,
-    cta: "Contact us",
+      "Every agent action is scored 1–10 before it runs. High-risk actions are queued for human review. You stay in control of what your agents do.",
   },
 ];
 
@@ -81,12 +56,12 @@ export default function LandingPage() {
             Now in beta — free to get started
           </div>
           <h1 className="text-5xl font-bold tracking-tight leading-tight sm:text-6xl">
-            Build AI agents
+            AI agents that
             <br />
-            <span className="text-zinc-400">that actually ship</span>
+            <span className="text-zinc-400">actually get things done</span>
           </h1>
           <p className="mx-auto mt-6 max-w-xl text-lg text-zinc-400 leading-relaxed">
-            forge-os gives your agents real-time search, user authentication, and payments — everything wired up so you can skip the boilerplate.
+            forge-os breaks your task into a parallel team of agents, runs them with live web search, and delivers one complete answer — with a risk-based approval gate so you stay in control.
           </p>
           <div className="mt-10 flex flex-col items-center gap-3 sm:flex-row sm:justify-center">
             <Link
@@ -108,8 +83,8 @@ export default function LandingPage() {
       {/* Features */}
       <section id="features" className="border-t border-zinc-900 px-6 py-24">
         <div className="mx-auto max-w-5xl">
-          <h2 className="mb-12 text-center text-3xl font-bold">Everything your agent needs</h2>
-          <div className="grid gap-6 sm:grid-cols-3">
+          <h2 className="mb-12 text-center text-3xl font-bold">Everything your agents need</h2>
+          <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
             {features.map((f) => (
               <div
                 key={f.title}
@@ -124,7 +99,30 @@ export default function LandingPage() {
         </div>
       </section>
 
-      {/* Search demo hint */}
+      {/* How it works */}
+      <section className="border-t border-zinc-900 px-6 py-20">
+        <div className="mx-auto max-w-3xl">
+          <h2 className="mb-10 text-center text-3xl font-bold">How it works</h2>
+          <div className="space-y-4">
+            {[
+              { step: "01", title: "Describe your task", desc: "Type anything — research, reports, LaTeX papers, comparisons. Plain English works." },
+              { step: "02", title: "Agents plan and run", desc: "Claude decomposes your request into 2–5 specialist agents. They search the web and work in parallel." },
+              { step: "03", title: "Review and approve", desc: "High-risk actions surface for your approval before they execute. You stay in control." },
+              { step: "04", title: "Get your answer", desc: "One clean, synthesised result — ready to download as markdown or LaTeX." },
+            ].map(({ step, title, desc }) => (
+              <div key={step} className="flex gap-5 rounded-xl border border-zinc-800 bg-zinc-900/50 px-5 py-4">
+                <span className="shrink-0 font-mono text-sm font-bold text-zinc-700">{step}</span>
+                <div>
+                  <p className="font-semibold text-white">{title}</p>
+                  <p className="mt-0.5 text-sm text-zinc-400">{desc}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* Search demo */}
       <section className="border-t border-zinc-900 px-6 py-20">
         <div className="mx-auto max-w-3xl">
           <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-8">
@@ -146,63 +144,17 @@ export default function LandingPage() {
         </div>
       </section>
 
-      {/* Pricing */}
-      <section id="pricing" className="border-t border-zinc-900 px-6 py-24">
-        <div className="mx-auto max-w-5xl">
-          <h2 className="mb-4 text-center text-3xl font-bold">Simple pricing</h2>
-          <p className="mb-12 text-center text-zinc-400">Start free. Upgrade when you need more.</p>
-          <div className="grid gap-6 sm:grid-cols-3">
-            {plans.map((plan) => (
-              <div
-                key={plan.name}
-                className={`rounded-xl border p-6 ${
-                  plan.highlighted
-                    ? "border-white bg-white text-zinc-950"
-                    : "border-zinc-800 bg-zinc-900"
-                }`}
-              >
-                <div className="mb-4">
-                  <p className={`text-sm font-medium ${plan.highlighted ? "text-zinc-600" : "text-zinc-400"}`}>
-                    {plan.name}
-                  </p>
-                  <p className="mt-1 text-3xl font-bold">
-                    {plan.price}
-                    {plan.period && (
-                      <span className={`text-base font-normal ${plan.highlighted ? "text-zinc-500" : "text-zinc-500"}`}>
-                        {plan.period}
-                      </span>
-                    )}
-                  </p>
-                  <p className={`mt-1 text-sm ${plan.highlighted ? "text-zinc-600" : "text-zinc-400"}`}>
-                    {plan.description}
-                  </p>
-                </div>
-
-                <ul className="mb-6 space-y-2">
-                  {plan.features.map((feat) => (
-                    <li
-                      key={feat}
-                      className={`flex items-center gap-2 text-sm ${plan.highlighted ? "text-zinc-700" : "text-zinc-300"}`}
-                    >
-                      <span className={plan.highlighted ? "text-zinc-900" : "text-zinc-400"}>✓</span>
-                      {feat}
-                    </li>
-                  ))}
-                </ul>
-
-                <Link
-                  href="/auth/signup"
-                  className={`block w-full rounded-lg px-4 py-2.5 text-center text-sm font-medium transition-colors ${
-                    plan.highlighted
-                      ? "bg-zinc-950 text-white hover:bg-zinc-800"
-                      : "border border-zinc-700 text-zinc-300 hover:border-zinc-600 hover:text-white"
-                  }`}
-                >
-                  {plan.cta}
-                </Link>
-              </div>
-            ))}
-          </div>
+      {/* CTA */}
+      <section className="border-t border-zinc-900 px-6 py-24 text-center">
+        <div className="mx-auto max-w-xl">
+          <h2 className="text-3xl font-bold">Ready to launch your agents?</h2>
+          <p className="mt-4 text-zinc-400">Free to use. No credit card required.</p>
+          <Link
+            href="/auth/signup"
+            className="mt-8 inline-block rounded-lg bg-white px-8 py-3 text-sm font-semibold text-zinc-950 hover:bg-zinc-100 transition-colors"
+          >
+            Get started for free →
+          </Link>
         </div>
       </section>
 
@@ -210,7 +162,7 @@ export default function LandingPage() {
       <footer className="border-t border-zinc-900 px-6 py-10">
         <div className="mx-auto max-w-5xl flex flex-col items-center justify-between gap-4 text-sm text-zinc-500 sm:flex-row">
           <span className="font-medium text-zinc-400">forge-os</span>
-          <span>Built with Next.js · Supabase · Stripe</span>
+          <span>Built with Next.js · Supabase · Claude</span>
         </div>
       </footer>
     </div>

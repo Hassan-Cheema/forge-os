@@ -10,20 +10,13 @@ export interface Report {
   created_at: string;
 }
 
-export default async function DashboardPage({
-  searchParams,
-}: {
-  searchParams: Promise<{ checkout?: string }>;
-}) {
+export default async function DashboardPage() {
   const supabase = await createClient();
   const {
     data: { user },
   } = await supabase.auth.getUser();
 
   if (!user) redirect("/auth/login");
-
-  const params = await searchParams;
-  const justPaid = params.checkout === "success";
 
   // Fetch reports for this user, newest first
   const { data: reports } = await supabase
@@ -59,15 +52,8 @@ export default async function DashboardPage({
         </div>
       </nav>
 
-      {/* Payment success banner */}
-      {justPaid && (
-        <div className="border-b border-green-900 bg-green-950/40 px-6 py-3 text-center text-sm text-green-400">
-          Payment successful — your subscription is now active.
-        </div>
-      )}
-
       {/* Agent runner — the whole product */}
-      <AgentRunner reports={(reports as Report[]) ?? []} />
+      <AgentRunner userId={user.id} reports={(reports as Report[]) ?? []} />
     </div>
   );
 }

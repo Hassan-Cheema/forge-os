@@ -81,3 +81,26 @@ CREATE POLICY "Users see their own approvals"
 CREATE INDEX IF NOT EXISTS actions_user_id_idx        ON actions        (user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS actions_agent_id_idx       ON actions        (agent_id);
 CREATE INDEX IF NOT EXISTS pending_approvals_user_idx ON pending_approvals (user_id, status, created_at DESC);
+
+
+-- ── reports ───────────────────────────────────────────────────────────────────
+-- Persisted synthesis outputs — one row per completed agent run.
+
+CREATE TABLE IF NOT EXISTS reports (
+  id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id     UUID        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  prompt      TEXT        NOT NULL,
+  content     TEXT        NOT NULL,
+  type        TEXT        NOT NULL DEFAULT 'research'
+                          CHECK (type IN ('research', 'latex')),
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE reports ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users see their own reports"
+  ON reports FOR ALL
+  USING  (auth.uid() = user_id)
+  WITH CHECK (auth.uid() = user_id);
+
+CREATE INDEX IF NOT EXISTS reports_user_id_idx ON reports (user_id, created_at DESC);

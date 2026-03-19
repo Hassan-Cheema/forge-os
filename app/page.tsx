@@ -46,6 +46,9 @@ export default function LandingPage() {
         </div>
       </nav>
 
+      {/* Main content */}
+      <main>
+
       {/* Hero */}
       <section className="px-6 py-32 text-center">
         <div className="mx-auto max-w-3xl">
@@ -109,7 +112,7 @@ export default function LandingPage() {
               { step: "04", title: "Get your answer", desc: "One clean, synthesised result — ready to download as markdown or LaTeX." },
             ].map(({ step, title, desc }) => (
               <div key={step} className="flex gap-5 rounded-xl border border-zinc-800 bg-zinc-900/50 px-5 py-4">
-                <span className="shrink-0 font-mono text-sm font-bold text-zinc-700">{step}</span>
+                <span className="shrink-0 font-mono text-sm font-bold text-zinc-400">{step}</span>
                 <div>
                   <p className="font-semibold text-white">{title}</p>
                   <p className="mt-0.5 text-sm text-zinc-400">{desc}</p>
@@ -124,7 +127,7 @@ export default function LandingPage() {
       <section className="border-t border-zinc-900 px-6 py-20">
         <div className="mx-auto max-w-3xl">
           <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-8">
-            <p className="mb-3 text-xs font-mono text-zinc-500">GET /api/search?q=latest+AI+research</p>
+            <p className="mb-3 text-xs font-mono text-zinc-400">GET /api/search?q=latest+AI+research</p>
             <pre className="overflow-x-auto rounded-lg bg-zinc-950 p-4 text-xs text-zinc-300 leading-relaxed">
 {`{
   "query": "latest AI research",
@@ -155,6 +158,8 @@ export default function LandingPage() {
           </Link>
         </div>
       </section>
+
+      </main>
 
       {/* Footer */}
       <footer className="flex flex-col items-center justify-between gap-4 border-t border-zinc-900 px-6 py-10 text-sm text-zinc-500 sm:flex-row">

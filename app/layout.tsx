@@ -16,6 +16,9 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "FORGE OS — Autonomous AI Agent Platform",
   description: "Type a goal. Your AI team handles everything. Powered by Claude.",
+  verification: {
+    google: "boXxEEbd2OwHyVb9Otu60xvzqTUFuSkjCTUMnplwne4",
+  },
 };
 
 export default function RootLayout({

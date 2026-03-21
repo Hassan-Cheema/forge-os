@@ -10,7 +10,7 @@ import type { Report } from "./page";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type Phase = "idle" | "spawning" | "running" | "synthesizing" | "done" | "error";
+type Phase = "spawning" | "running" | "synthesizing" | "done" | "error";
 type Mode = "research" | "latex";
 
 interface AgentState extends AgentMeta {
@@ -29,114 +29,237 @@ interface PendingApproval {
   created_at: string;
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function openInOverleaf(latex: string) {
-  const form = document.createElement("form");
-  form.method = "POST";
-  form.action = "https://www.overleaf.com/docs";
-  form.target = "_blank";
-  form.rel = "noopener noreferrer";
-  const input = document.createElement("input");
-  input.type = "hidden";
-  input.name = "snip";
-  input.value = latex;
-  form.appendChild(input);
-  document.body.appendChild(form);
-  form.submit();
-  document.body.removeChild(form);
+interface ChatMessage {
+  id: string;
+  prompt: string;
+  mode: Mode;
+  phase: Phase;
+  plan: string | null;
+  agents: AgentState[];
+  synthesis: string;
+  synthesisDone: boolean;
+  errorMessage: string | null;
 }
 
-// ─── Constants ────────────────────────────────────────────────────────────────
+// ─── LaTeX → HTML renderer ───────────────────────────────────────────────────
 
-const EXAMPLES: Record<Mode, string[]> = {
-  research: [
-    "Research the top 5 AI coding tools in 2025 and write a comparison note",
-    "Find recent news about climate tech startups and draft a tweet thread",
-    "Research best practices for remote team management and create a summary doc",
-    "Look up the latest Next.js features and draft a blog post outline",
-  ],
-  latex: [
-    "Write an academic paper on the impact of large language models on software engineering",
-    "Produce a research paper surveying recent advances in quantum computing",
-    "Write a paper on the environmental impact of data centres",
-    "Produce an academic review of reinforcement learning from human feedback",
-  ],
-};
+function fmt(text: string): string {
+  return text
+    .replace(/\\textbf\{([^{}]+)\}/g, "<strong>$1</strong>")
+    .replace(/\\textit\{([^{}]+)\}/g, "<em>$1</em>")
+    .replace(/\\emph\{([^{}]+)\}/g, "<em>$1</em>")
+    .replace(/\\texttt\{([^{}]+)\}/g, "<code>$1</code>")
+    .replace(/\\url\{([^{}]+)\}/g, '<a href="$1">$1</a>')
+    .replace(/\\href\{([^{}]+)\}\{([^{}]+)\}/g, '<a href="$1">$2</a>')
+    .replace(/\\cite\{[^{}]+\}/g, "")
+    .replace(/\\ref\{[^{}]+\}/g, "")
+    .replace(/\\label\{[^{}]+\}/g, "")
+    .replace(/\\footnote\{[^{}]+\}/g, "")
+    .replace(/\\\\/g, "<br>")
+    .replace(/\\hline/g, "")
+    .replace(/\\noindent\b/g, "")
+    .replace(/\\newpage\b/g, '<hr class="pb">')
+    .replace(/\\[a-zA-Z]+\*?(?:\[[^\]]*\])?(?:\{[^{}]*\})*/g, " ")
+    .replace(/\{([^{}]*)\}/g, "$1")
+    .replace(/~/g, " ")
+    .replace(/ {2,}/g, " ")
+    .trim();
+}
+
+function latexToHtml(source: string): string {
+  const title = source.match(/\\title\{([\s\S]*?)\}/)?.[1]?.trim() ?? "Document";
+  const author = source.match(/\\author\{([\s\S]*?)\}/)?.[1]?.trim() ?? "Anonymous";
+  const rawDate = source.match(/\\date\{([\s\S]*?)\}/)?.[1]?.trim() ?? "";
+  const date =
+    rawDate === "\\today"
+      ? new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })
+      : rawDate;
+
+  const bodyMatch = source.match(/\\begin\{document\}([\s\S]*?)\\end\{document\}/);
+  let body = bodyMatch ? bodyMatch[1] : source;
+
+  body = body.replace(/\\maketitle/g, "");
+
+  // Abstract
+  body = body.replace(
+    /\\begin\{abstract\}([\s\S]*?)\\end\{abstract\}/g,
+    (_, c) =>
+      `<div class="abstract"><p class="abtitle">Abstract</p><p>${fmt(c.trim())}</p></div>`
+  );
+
+  // Sections
+  body = body.replace(/\\section\*?\{([\s\S]*?)\}/g, (_, t) => `<h2>${fmt(t)}</h2>`);
+  body = body.replace(/\\subsection\*?\{([\s\S]*?)\}/g, (_, t) => `<h3>${fmt(t)}</h3>`);
+  body = body.replace(/\\subsubsection\*?\{([\s\S]*?)\}/g, (_, t) => `<h4>${fmt(t)}</h4>`);
+
+  // Lists
+  body = body.replace(/\\begin\{itemize\}([\s\S]*?)\\end\{itemize\}/g, (_, c) => {
+    const items = c
+      .split("\\item")
+      .slice(1)
+      .map((i: string) => `<li>${fmt(i.trim())}</li>`)
+      .join("");
+    return `<ul>${items}</ul>`;
+  });
+  body = body.replace(/\\begin\{enumerate\}([\s\S]*?)\\end\{enumerate\}/g, (_, c) => {
+    const items = c
+      .split("\\item")
+      .slice(1)
+      .map((i: string) => `<li>${fmt(i.trim())}</li>`)
+      .join("");
+    return `<ol>${items}</ol>`;
+  });
+
+  // Remove tables (too complex to render inline)
+  body = body.replace(/\\begin\{table\}[\s\S]*?\\end\{table\}/g, "");
+  body = body.replace(/\\begin\{tabular\}[\s\S]*?\\end\{tabular\}/g, "");
+
+  // Bibliography
+  body = body.replace(
+    /\\begin\{thebibliography\}\{[^}]*\}([\s\S]*?)\\end\{thebibliography\}/g,
+    (_, c) => {
+      const refs = c
+        .split("\\bibitem{")
+        .slice(1)
+        .map((item: string) => {
+          const content = item.replace(/^[^}]+\}/, "").trim();
+          return `<li>${fmt(content)}</li>`;
+        })
+        .join("");
+      return `<h2>References</h2><ol class="refs">${refs}</ol>`;
+    }
+  );
+
+  body = fmt(body);
+
+  body = body
+    .split(/\n{2,}/)
+    .map((p: string) => {
+      p = p.trim();
+      if (!p) return "";
+      if (/^<(h[1-6]|ul|ol|div|hr)/.test(p)) return p;
+      return `<p>${p.replace(/\n/g, " ")}</p>`;
+    })
+    .filter(Boolean)
+    .join("\n");
+
+  return `<div class="doc-header">
+    <h1>${title}</h1>
+    <p class="author">${author}</p>
+    ${date ? `<p class="date">${date}</p>` : ""}
+  </div>
+  ${body}`;
+}
+
+function buildPreviewHtml(source: string): string {
+  const content = latexToHtml(source);
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Preview</title>
+<script>MathJax={tex:{inlineMath:[["$","$"],["\\\\(","\\\\)"]],displayMath:[["$$","$$"],["\\\\[","\\\\]"]]}};<\/script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js" async><\/script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#fff;color:#111;font-family:Georgia,'Times New Roman',serif;font-size:12pt;line-height:1.8;max-width:760px;margin:0 auto;padding:2.5rem 3rem}
+.doc-header{text-align:center;padding-bottom:1.5rem;margin-bottom:2rem;border-bottom:1px solid #ccc}
+.doc-header h1{font-size:1.5rem;font-weight:bold;margin-bottom:.4rem;line-height:1.3}
+.author{font-size:.95rem;color:#444;margin-top:.2rem}
+.date{font-size:.85rem;color:#666;margin-top:.15rem}
+h2{font-size:1.05rem;font-weight:bold;margin:1.8rem 0 .5rem}
+h3{font-size:1rem;font-weight:bold;font-style:italic;margin:1.4rem 0 .4rem}
+h4{font-size:.95rem;font-weight:bold;margin:1.1rem 0 .3rem}
+p{margin-bottom:.75rem;text-align:justify}
+.abstract{background:#f7f7f7;border:1px solid #e0e0e0;padding:.9rem 1.1rem;margin:1.5rem 0;border-radius:3px}
+.abtitle{font-weight:bold;text-align:center;font-size:.85rem;text-transform:uppercase;letter-spacing:.05em;margin-bottom:.4rem!important}
+ul,ol{margin:.4rem 0 .7rem 1.4rem}
+li{margin-bottom:.25rem}
+.refs li{font-size:.9rem;margin-bottom:.4rem}
+code{font-family:monospace;background:#f0f0f0;padding:.1em .3em;border-radius:2px;font-size:.88em}
+a{color:#1a0dab}
+hr.pb{border:none;border-top:1px dashed #bbb;margin:1.5rem 0}
+@media print{body{padding:0;max-width:none}.no-print{display:none!important}}
+</style>
+</head>
+<body>${content}</body>
+</html>`;
+}
 
 // ─── Markdown theme ───────────────────────────────────────────────────────────
 
 const md: Components = {
-  h1: ({ children }) => (
-    <h1 className="mb-3 mt-6 text-lg font-bold text-white first:mt-0">{children}</h1>
-  ),
-  h2: ({ children }) => (
-    <h2 className="mb-2 mt-5 text-base font-bold text-white first:mt-0">{children}</h2>
-  ),
-  h3: ({ children }) => (
-    <h3 className="mb-2 mt-4 text-sm font-semibold text-zinc-100 first:mt-0">{children}</h3>
-  ),
-  p: ({ children }) => (
-    <p className="mb-3 text-sm leading-relaxed text-zinc-300 last:mb-0">{children}</p>
-  ),
+  h1: ({ children }) => <h1 className="mb-3 mt-6 text-lg font-bold text-white first:mt-0">{children}</h1>,
+  h2: ({ children }) => <h2 className="mb-2 mt-5 text-base font-bold text-white first:mt-0">{children}</h2>,
+  h3: ({ children }) => <h3 className="mb-2 mt-4 text-sm font-semibold text-zinc-100 first:mt-0">{children}</h3>,
+  p: ({ children }) => <p className="mb-3 text-sm leading-relaxed text-zinc-300 last:mb-0">{children}</p>,
   ul: ({ children }) => <ul className="mb-3 space-y-1 pl-1">{children}</ul>,
-  ol: ({ children }) => (
-    <ol className="mb-3 list-decimal space-y-1 pl-5">{children}</ol>
-  ),
+  ol: ({ children }) => <ol className="mb-3 list-decimal space-y-1 pl-5">{children}</ol>,
   li: ({ children }) => (
     <li className="flex gap-2 text-sm leading-relaxed text-zinc-300">
       <span className="mt-0.5 shrink-0 text-zinc-600">•</span>
       <span>{children}</span>
     </li>
   ),
-  strong: ({ children }) => (
-    <strong className="font-semibold text-white">{children}</strong>
-  ),
+  strong: ({ children }) => <strong className="font-semibold text-white">{children}</strong>,
   em: ({ children }) => <em className="italic text-zinc-400">{children}</em>,
   hr: () => <hr className="my-5 border-zinc-800" />,
   blockquote: ({ children }) => (
-    <blockquote className="my-3 border-l-2 border-zinc-700 pl-4 italic text-zinc-400">
-      {children}
-    </blockquote>
+    <blockquote className="my-3 border-l-2 border-zinc-700 pl-4 italic text-zinc-400">{children}</blockquote>
   ),
   code: ({ className, children }) =>
     className?.startsWith("language-") ? (
-      <code className="block overflow-x-auto rounded-lg bg-zinc-950 px-4 py-3 font-mono text-xs text-zinc-200">
-        {children}
-      </code>
+      <code className="block overflow-x-auto rounded-lg bg-zinc-950 px-4 py-3 font-mono text-xs text-zinc-200">{children}</code>
     ) : (
-      <code className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-xs text-zinc-200">
-        {children}
-      </code>
+      <code className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-xs text-zinc-200">{children}</code>
     ),
-  pre: ({ children }) => (
-    <pre className="mb-3 overflow-x-auto rounded-lg bg-zinc-950 p-0">{children}</pre>
-  ),
+  pre: ({ children }) => <pre className="mb-3 overflow-x-auto rounded-lg bg-zinc-950 p-0">{children}</pre>,
   table: ({ children }) => (
     <div className="mb-4 overflow-x-auto rounded-lg border border-zinc-800">
       <table className="w-full border-collapse text-xs">{children}</table>
     </div>
   ),
   thead: ({ children }) => <thead className="bg-zinc-800/60">{children}</thead>,
-  tbody: ({ children }) => (
-    <tbody className="divide-y divide-zinc-800/60">{children}</tbody>
-  ),
-  tr: ({ children }) => (
-    <tr className="transition-colors hover:bg-zinc-800/30">{children}</tr>
-  ),
-  th: ({ children }) => (
-    <th className="px-3 py-2.5 text-left font-semibold text-zinc-200">{children}</th>
-  ),
-  td: ({ children }) => (
-    <td className="px-3 py-2.5 text-zinc-300">{children}</td>
-  ),
+  tbody: ({ children }) => <tbody className="divide-y divide-zinc-800/60">{children}</tbody>,
+  tr: ({ children }) => <tr className="transition-colors hover:bg-zinc-800/30">{children}</tr>,
+  th: ({ children }) => <th className="px-3 py-2.5 text-left font-semibold text-zinc-200">{children}</th>,
+  td: ({ children }) => <td className="px-3 py-2.5 text-zinc-300">{children}</td>,
 };
+
+// ─── Utilities ────────────────────────────────────────────────────────────────
+
+function groupByDate(reports: Report[]) {
+  const todayStart = new Date().setHours(0, 0, 0, 0);
+  const DAY = 86_400_000;
+  const buckets: { label: string; items: Report[] }[] = [
+    { label: "Today", items: [] },
+    { label: "Yesterday", items: [] },
+    { label: "Previous 7 days", items: [] },
+    { label: "Older", items: [] },
+  ];
+  for (const r of reports) {
+    const t = new Date(r.created_at).getTime();
+    if (t >= todayStart) buckets[0].items.push(r);
+    else if (t >= todayStart - DAY) buckets[1].items.push(r);
+    else if (t >= todayStart - 7 * DAY) buckets[2].items.push(r);
+    else buckets[3].items.push(r);
+  }
+  return buckets.filter((b) => b.items.length > 0);
+}
+
+function fmtTime(iso: string) {
+  const d = new Date(iso);
+  const now = new Date();
+  if (d.toDateString() === now.toDateString())
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleDateString([], { month: "short", day: "numeric" });
+}
 
 // ─── StatusDot ────────────────────────────────────────────────────────────────
 
 function StatusDot({ status }: { status: AgentState["status"] }) {
-  if (status === "waiting")
-    return <span className="inline-block h-2 w-2 rounded-full bg-zinc-600" />;
+  if (status === "waiting") return <span className="inline-block h-2 w-2 rounded-full bg-zinc-600" />;
   if (status === "running")
     return (
       <span className="relative inline-flex h-2 w-2">
@@ -144,141 +267,54 @@ function StatusDot({ status }: { status: AgentState["status"] }) {
         <span className="relative inline-flex h-2 w-2 rounded-full bg-blue-500" />
       </span>
     );
-  if (status === "done")
-    return <span className="inline-block h-2 w-2 rounded-full bg-green-500" />;
+  if (status === "done") return <span className="inline-block h-2 w-2 rounded-full bg-green-500" />;
   return <span className="inline-block h-2 w-2 rounded-full bg-red-500" />;
 }
 
 // ─── AgentCard ────────────────────────────────────────────────────────────────
 
 function AgentCard({ agent }: { agent: AgentState }) {
-  const border = {
-    waiting: "border-zinc-800",
-    running: "border-blue-900",
-    done: "border-green-900",
-    failed: "border-red-900",
-  }[agent.status];
-
-  const bg = {
-    waiting: "bg-zinc-900/40",
-    running: "bg-blue-950/30",
-    done: "bg-green-950/20",
-    failed: "bg-red-950/30",
-  }[agent.status];
-
+  const border = { waiting: "border-zinc-800", running: "border-blue-900", done: "border-green-900", failed: "border-red-900" }[agent.status];
+  const bg = { waiting: "bg-zinc-900/40", running: "bg-blue-950/30", done: "bg-green-950/20", failed: "bg-red-950/30" }[agent.status];
   return (
-    <div className={`rounded-lg border ${border} ${bg} px-4 py-3 transition-all duration-300`}>
-      <div className="flex items-center gap-2.5">
-        <span className="text-lg leading-none">{agent.emoji}</span>
+    <div className={`rounded-lg border ${border} ${bg} px-3 py-2.5 transition-all duration-300`}>
+      <div className="flex items-center gap-2">
+        <span className="text-base leading-none">{agent.emoji}</span>
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-medium text-white">{agent.name}</p>
+          <p className="truncate text-xs font-medium text-white">{agent.name}</p>
           <div className="mt-0.5 flex items-center gap-1.5">
             <StatusDot status={agent.status} />
-            <span className="text-xs capitalize text-zinc-500">{agent.status}</span>
+            <span className="text-[10px] capitalize text-zinc-500">{agent.status}</span>
             {agent.result && (
               <>
                 <span className="text-zinc-700">·</span>
-                <span className="text-xs text-zinc-500">
-                  {agent.result.stepsExecuted} steps
-                </span>
+                <span className="text-[10px] text-zinc-500">{agent.result.stepsExecuted}s</span>
               </>
             )}
           </div>
         </div>
       </div>
-
       {agent.status === "running" && (
-        <div className="mt-2.5 space-y-1">
-          <div className="h-1 animate-pulse rounded-full bg-zinc-800" />
-          <div className="h-1 w-2/3 animate-pulse rounded-full bg-zinc-800" />
+        <div className="mt-2 space-y-1">
+          <div className="h-0.5 animate-pulse rounded-full bg-zinc-800" />
+          <div className="h-0.5 w-2/3 animate-pulse rounded-full bg-zinc-800" />
         </div>
       )}
-
       {agent.status === "failed" && agent.errorMessage && (
-        <p className="mt-1.5 text-xs text-red-400">{agent.errorMessage}</p>
+        <p className="mt-1 text-[10px] text-red-400">{agent.errorMessage}</p>
       )}
-    </div>
-  );
-}
-
-// ─── ModeToggle ───────────────────────────────────────────────────────────────
-
-function ModeToggle({ mode, onChange }: { mode: Mode; onChange: (m: Mode) => void }) {
-  return (
-    <div className="inline-flex rounded-lg border border-zinc-800 bg-zinc-900 p-0.5">
-      <button
-        onClick={() => onChange("research")}
-        className={`rounded-md px-3 py-1.5 text-xs font-medium transition-all ${
-          mode === "research"
-            ? "bg-white text-zinc-950 shadow-sm"
-            : "text-zinc-400 hover:text-zinc-200"
-        }`}
-      >
-        📄 Research Report
-      </button>
-      <button
-        onClick={() => onChange("latex")}
-        className={`rounded-md px-3 py-1.5 text-xs font-medium transition-all ${
-          mode === "latex"
-            ? "bg-white text-zinc-950 shadow-sm"
-            : "text-zinc-400 hover:text-zinc-200"
-        }`}
-      >
-        📐 LaTeX Paper
-      </button>
     </div>
   );
 }
 
 // ─── LaTeXViewer ─────────────────────────────────────────────────────────────
 
-function buildPreviewHtml(source: string): string {
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>LaTeX Preview</title>
-<script src="https://cdn.jsdelivr.net/npm/latex.js@0.12.6/dist/latex.js"><\/script>
-<style>
-  *{box-sizing:border-box}
-  body{background:#fff;color:#111;padding:2.5rem 3rem;font-family:Georgia,'Times New Roman',serif;max-width:800px;margin:0 auto;line-height:1.75;font-size:14px}
-  #loading{font:13px/1.6 system-ui,sans-serif;color:#6b7280;padding:2rem 0;text-align:center}
-  #err{color:#b91c1c;font:12px/1.6 monospace;padding:12px 16px;background:#fef2f2;border:1px solid #fecaca;border-radius:6px;margin-top:1rem;display:none}
-</style>
-</head>
-<body>
-<div id="loading">Rendering LaTeX\u2026</div>
-<div id="output"></div>
-<div id="err"></div>
-<script>
-window.addEventListener("DOMContentLoaded", function () {
-  var src = ${JSON.stringify(source)};
-  try {
-    var g = new latexjs.HtmlGenerator({ hyphenate: false });
-    var d = latexjs.parse(src, { generator: g });
-    document.head.appendChild(
-      d.stylesAndScripts("https://cdn.jsdelivr.net/npm/latex.js@0.12.6/dist/")
-    );
-    document.getElementById("output").appendChild(d.domFragment());
-    document.getElementById("loading").remove();
-  } catch (e) {
-    document.getElementById("loading").remove();
-    var el = document.getElementById("err");
-    el.style.display = "block";
-    el.textContent = "Preview failed: " + e.message +
-      " \u2014 download the .tex file to compile a full PDF.";
-  }
-});
-<\/script>
-</body>
-</html>`;
-}
-
-function LaTeXViewer({ text, streaming }: { text: string; streaming: boolean }) {
-  const [preview, setPreview] = useState(false);
+function LaTeXViewer({ text, streaming, onDownload }: { text: string; streaming: boolean; onDownload?: () => void }) {
+  const [tab, setTab] = useState<"source" | "preview">("source");
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const iframeRef = useRef<HTMLIFrameElement>(null);
 
+  // Clean up blob URL on unmount or when it changes
   useEffect(() => {
     return () => {
       if (blobUrl) URL.revokeObjectURL(blobUrl);
@@ -289,39 +325,70 @@ function LaTeXViewer({ text, streaming }: { text: string; streaming: boolean }) 
     if (blobUrl) URL.revokeObjectURL(blobUrl);
     const blob = new Blob([buildPreviewHtml(text)], { type: "text/html" });
     setBlobUrl(URL.createObjectURL(blob));
-    setPreview(true);
+    setTab("preview");
   }
 
-  function closePreview() {
-    if (blobUrl) {
-      URL.revokeObjectURL(blobUrl);
-      setBlobUrl(null);
-    }
-    setPreview(false);
+  function showSource() {
+    setTab("source");
+  }
+
+  function printPdf() {
+    iframeRef.current?.contentWindow?.print();
   }
 
   return (
-    <div>
-      <div className="mb-2 flex justify-end">
+    <div className="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900">
+      {/* Tab bar */}
+      <div className="flex items-center border-b border-zinc-800 px-1">
         <button
-          onClick={preview ? closePreview : openPreview}
-          disabled={streaming || !text}
-          className="rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-400 transition-colors hover:border-zinc-500 hover:text-white disabled:opacity-40"
+          onClick={showSource}
+          className={`px-4 py-2.5 text-xs font-medium transition-colors border-b-2 -mb-px ${
+            tab === "source" ? "border-white text-white" : "border-transparent text-zinc-500 hover:text-zinc-300"
+          }`}
         >
-          {preview ? "← Source" : "Preview →"}
+          LaTeX
         </button>
+        <button
+          onClick={openPreview}
+          disabled={streaming || !text}
+          className={`px-4 py-2.5 text-xs font-medium transition-colors border-b-2 -mb-px ${
+            tab === "preview" ? "border-white text-white" : "border-transparent text-zinc-500 hover:text-zinc-300"
+          } disabled:opacity-40`}
+        >
+          Preview
+        </button>
+        <div className="ml-auto flex items-center gap-1.5 pr-3">
+          {tab === "preview" && blobUrl && (
+            <button
+              onClick={printPdf}
+              className="rounded border border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-400 transition-colors hover:border-zinc-500 hover:text-white"
+            >
+              ↓ Save as PDF
+            </button>
+          )}
+          {onDownload && (
+            <button
+              onClick={onDownload}
+              className="rounded border border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-400 transition-colors hover:border-zinc-500 hover:text-white"
+            >
+              ↓ .tex
+            </button>
+          )}
+        </div>
       </div>
 
-      {preview && blobUrl ? (
+      {/* Content */}
+      {tab === "preview" && blobUrl ? (
         <iframe
+          ref={iframeRef}
           src={blobUrl}
-          className="w-full rounded-lg border border-zinc-700 bg-white"
+          className="w-full bg-white"
           style={{ height: "640px" }}
           sandbox="allow-scripts"
           title="LaTeX Preview"
         />
       ) : (
-        <div className="relative overflow-x-auto rounded-lg bg-zinc-950 px-5 py-4">
+        <div className="relative overflow-x-auto px-5 py-4">
           {streaming && (
             <span className="absolute right-3 top-3 flex items-center gap-0.5 text-xs text-zinc-600">
               <span className="animate-bounce">·</span>
@@ -329,187 +396,7 @@ function LaTeXViewer({ text, streaming }: { text: string; streaming: boolean }) 
               <span className="animate-bounce [animation-delay:150ms]">·</span>
             </span>
           )}
-          <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-zinc-300">
-            {text}
-          </pre>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── PendingApprovals ─────────────────────────────────────────────────────────
-
-function PendingApprovals({ active }: { active: boolean }) {
-  const [approvals, setApprovals] = useState<PendingApproval[]>([]);
-  const [resolving, setResolving] = useState<Set<string>>(new Set());
-
-  useEffect(() => {
-    if (!active) {
-      setApprovals([]);
-      return;
-    }
-
-    async function poll() {
-      const res = await fetch("/api/agents/approvals");
-      if (res.ok) {
-        const data = await res.json();
-        setApprovals(data.approvals ?? []);
-      }
-    }
-
-    poll();
-    const interval = setInterval(poll, 3000);
-    return () => clearInterval(interval);
-  }, [active]);
-
-  async function resolve(id: string, action: "approve" | "reject") {
-    setResolving((prev) => new Set(prev).add(id));
-    await fetch("/api/agents/approvals", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id, action }),
-    });
-    setApprovals((prev) => prev.filter((a) => a.id !== id));
-    setResolving((prev) => {
-      const next = new Set(prev);
-      next.delete(id);
-      return next;
-    });
-  }
-
-  if (approvals.length === 0) return null;
-
-  return (
-    <div className="mb-6 rounded-xl border border-yellow-900/60 bg-yellow-950/20 p-4">
-      <div className="mb-3 flex items-center gap-2">
-        <span className="relative inline-flex h-2 w-2">
-          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-yellow-400 opacity-75" />
-          <span className="relative inline-flex h-2 w-2 rounded-full bg-yellow-500" />
-        </span>
-        <p className="text-xs font-semibold uppercase tracking-widest text-yellow-600">
-          Pending approvals ({approvals.length})
-        </p>
-      </div>
-      <div className="space-y-2">
-        {approvals.map((a) => (
-          <div
-            key={a.id}
-            className="rounded-lg border border-yellow-900/40 bg-yellow-950/30 p-3"
-          >
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="rounded bg-yellow-900/50 px-1.5 py-0.5 font-mono text-[10px] text-yellow-400">
-                    {a.tool_name}
-                  </span>
-                  <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">
-                    {a.category}
-                  </span>
-                  <span className="text-[10px] text-yellow-700 font-medium">
-                    risk {a.risk_score}/10
-                  </span>
-                </div>
-                {a.description && (
-                  <p className="mt-1.5 text-xs text-zinc-300 leading-relaxed">{a.description}</p>
-                )}
-                {a.risk_reason && (
-                  <p className="mt-1 text-[10px] text-zinc-500 italic">{a.risk_reason}</p>
-                )}
-              </div>
-              <div className="flex shrink-0 gap-1.5">
-                <button
-                  onClick={() => resolve(a.id, "approve")}
-                  disabled={resolving.has(a.id)}
-                  className="rounded-md border border-green-800 bg-green-950/40 px-2.5 py-1 text-xs font-medium text-green-400 transition-colors hover:bg-green-900/40 disabled:opacity-40"
-                >
-                  Approve
-                </button>
-                <button
-                  onClick={() => resolve(a.id, "reject")}
-                  disabled={resolving.has(a.id)}
-                  className="rounded-md border border-red-900 bg-red-950/40 px-2.5 py-1 text-xs font-medium text-red-400 transition-colors hover:bg-red-900/40 disabled:opacity-40"
-                >
-                  Reject
-                </button>
-              </div>
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// ─── ReportItem ───────────────────────────────────────────────────────────────
-
-function ReportItem({ report }: { report: Report }) {
-  const [open, setOpen] = useState(false);
-  const isLatex = report.type === "latex";
-
-  const date = new Date(report.created_at).toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
-
-  function download() {
-    const ext = isLatex ? "tex" : "md";
-    const mime = isLatex ? "application/x-tex" : "text/markdown";
-    const blob = new Blob([report.content], { type: mime });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `report.${ext}`;
-    a.click();
-    URL.revokeObjectURL(url);
-  }
-
-  return (
-    <div className="rounded-xl border border-zinc-800 bg-zinc-900 overflow-hidden transition-all">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-start justify-between gap-3 px-4 py-3 text-left hover:bg-zinc-800/40 transition-colors"
-      >
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-zinc-600">{isLatex ? "📐" : "📄"}</span>
-            <p className="truncate text-sm text-zinc-200">{report.prompt}</p>
-          </div>
-          <p className="mt-0.5 text-xs text-zinc-600">{date}</p>
-        </div>
-        <span className="mt-0.5 shrink-0 text-xs text-zinc-500">
-          {open ? "▲" : "▼"}
-        </span>
-      </button>
-
-      {open && (
-        <div className="border-t border-zinc-800">
-          <div className="flex justify-end gap-2 px-4 py-2 border-b border-zinc-800/60">
-            {isLatex && (
-              <button
-                onClick={() => openInOverleaf(report.content)}
-                className="rounded-md border border-blue-900 bg-blue-950/40 px-2.5 py-1 text-xs text-blue-400 transition-colors hover:bg-blue-900/40 hover:text-blue-300"
-              >
-                ↗ Preview PDF
-              </button>
-            )}
-            <button
-              onClick={download}
-              className="rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-400 transition-colors hover:border-zinc-500 hover:text-white"
-            >
-              ↓ {isLatex ? "Download .tex" : "Download .md"}
-            </button>
-          </div>
-          <div className="px-5 py-5">
-            {isLatex ? (
-              <LaTeXViewer text={report.content} streaming={false} />
-            ) : (
-              <ReactMarkdown remarkPlugins={[remarkGfm]} components={md}>
-                {report.content}
-              </ReactMarkdown>
-            )}
-          </div>
+          <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-zinc-300">{text}</pre>
         </div>
       )}
     </div>
@@ -522,13 +409,8 @@ function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
   return (
     <button
-      onClick={() =>
-        navigator.clipboard.writeText(text).then(() => {
-          setCopied(true);
-          setTimeout(() => setCopied(false), 2000);
-        })
-      }
-      className="rounded-md border border-zinc-700 px-2.5 py-1 text-xs transition-colors hover:border-zinc-500 hover:text-white"
+      onClick={() => navigator.clipboard.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); })}
+      className="rounded border border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-400 transition-colors hover:border-zinc-500 hover:text-white"
       style={{ color: copied ? "#4ade80" : undefined }}
     >
       {copied ? "✓ Copied" : "Copy"}
@@ -536,61 +418,505 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-// ─── Main component ───────────────────────────────────────────────────────────
+// ─── PendingApprovals ─────────────────────────────────────────────────────────
+
+function PendingApprovals({ active }: { active: boolean }) {
+  const [approvals, setApprovals] = useState<PendingApproval[]>([]);
+  const [resolving, setResolving] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (!active) { setApprovals([]); return; }
+    async function poll() {
+      const res = await fetch("/api/agents/approvals");
+      if (res.ok) setApprovals((await res.json()).approvals ?? []);
+    }
+    poll();
+    const t = setInterval(poll, 3000);
+    return () => clearInterval(t);
+  }, [active]);
+
+  async function resolve(id: string, action: "approve" | "reject") {
+    setResolving((p) => new Set(p).add(id));
+    await fetch("/api/agents/approvals", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, action }),
+    });
+    setApprovals((p) => p.filter((a) => a.id !== id));
+    setResolving((p) => { const n = new Set(p); n.delete(id); return n; });
+  }
+
+  if (!approvals.length) return null;
+
+  return (
+    <div className="mb-4 rounded-xl border border-yellow-900/60 bg-yellow-950/20 p-3">
+      <div className="mb-2 flex items-center gap-2">
+        <span className="relative inline-flex h-2 w-2">
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-yellow-400 opacity-75" />
+          <span className="relative inline-flex h-2 w-2 rounded-full bg-yellow-500" />
+        </span>
+        <p className="text-[10px] font-semibold uppercase tracking-widest text-yellow-600">
+          Pending approvals ({approvals.length})
+        </p>
+      </div>
+      <div className="space-y-2">
+        {approvals.map((a) => (
+          <div key={a.id} className="rounded-lg border border-yellow-900/40 bg-yellow-950/30 p-2.5">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="rounded bg-yellow-900/50 px-1.5 py-0.5 font-mono text-[10px] text-yellow-400">{a.tool_name}</span>
+                  <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">{a.category}</span>
+                  <span className="text-[10px] font-medium text-yellow-700">risk {a.risk_score}/10</span>
+                </div>
+                {a.description && <p className="mt-1 text-xs text-zinc-300">{a.description}</p>}
+                {a.risk_reason && <p className="mt-0.5 text-[10px] italic text-zinc-500">{a.risk_reason}</p>}
+              </div>
+              <div className="flex shrink-0 gap-1">
+                <button onClick={() => resolve(a.id, "approve")} disabled={resolving.has(a.id)} className="rounded border border-green-800 bg-green-950/40 px-2 py-0.5 text-[11px] font-medium text-green-400 hover:bg-green-900/40 disabled:opacity-40">Approve</button>
+                <button onClick={() => resolve(a.id, "reject")} disabled={resolving.has(a.id)} className="rounded border border-red-900 bg-red-950/40 px-2 py-0.5 text-[11px] font-medium text-red-400 hover:bg-red-900/40 disabled:opacity-40">Reject</button>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── MessageThread ────────────────────────────────────────────────────────────
+
+function MessageThread({ msg }: { msg: ChatMessage }) {
+  const [showAgents, setShowAgents] = useState(false);
+  const isLatex = msg.mode === "latex";
+  const isRunning = msg.phase === "running" || msg.phase === "spawning";
+  const isSynth = msg.phase === "synthesizing";
+  const isDone = msg.phase === "done";
+  const doneCount = msg.agents.filter((a) => a.status === "done").length;
+  const failedCount = msg.agents.filter((a) => a.status === "failed").length;
+  const totalSteps = msg.agents.reduce((s, a) => s + (a.result?.stepsExecuted ?? 0), 0);
+
+  function downloadSynthesis() {
+    const ext = isLatex ? "tex" : "md";
+    const mime = isLatex ? "application/x-tex" : "text/markdown";
+    const blob = new Blob([msg.synthesis], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `result.${ext}`; a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* User bubble */}
+      <div className="flex justify-end">
+        <div className="max-w-lg rounded-2xl rounded-br-sm bg-zinc-800 px-4 py-3">
+          <div className="mb-1 flex items-center gap-1.5">
+            <span className="text-[10px] text-zinc-500">{isLatex ? "📐 LaTeX" : "📄 Research"}</span>
+          </div>
+          <p className="text-sm text-white">{msg.prompt}</p>
+        </div>
+      </div>
+
+      {/* AI response */}
+      <div className="flex gap-3">
+        <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-white/[0.07] text-sm">
+          ⚙
+        </div>
+        <div className="flex-1 min-w-0">
+          {/* Spawning */}
+          {msg.phase === "spawning" && (
+            <p className="flex items-center gap-2 text-sm text-zinc-400">
+              <span className="inline-flex gap-0.5">
+                <span className="animate-bounce">·</span>
+                <span className="animate-bounce [animation-delay:75ms]">·</span>
+                <span className="animate-bounce [animation-delay:150ms]">·</span>
+              </span>
+              Planning your agent team…
+            </p>
+          )}
+
+          {/* Pending approvals */}
+          <PendingApprovals active={isRunning || isSynth} />
+
+          {/* Agent cards (while running) */}
+          {msg.agents.length > 0 && (isRunning || isSynth) && (
+            <div className="mb-4">
+              <div className={`grid gap-2 ${msg.agents.length === 1 ? "grid-cols-1" : msg.agents.length === 2 ? "grid-cols-2" : "grid-cols-2 sm:grid-cols-3"}`}>
+                {msg.agents.map((a) => <AgentCard key={a.id} agent={a} />)}
+              </div>
+              {isRunning && msg.agents.length > 0 && (
+                <div className="mt-2.5">
+                  <div className="mb-1 flex justify-between text-[10px] text-zinc-600">
+                    <span>{doneCount + failedCount}/{msg.agents.length} agents</span>
+                    <span>{Math.round(((doneCount + failedCount) / msg.agents.length) * 100)}%</span>
+                  </div>
+                  <div className="h-0.5 w-full rounded-full bg-zinc-800">
+                    <div
+                      className="h-0.5 rounded-full bg-blue-500 transition-all duration-500"
+                      style={{ width: `${((doneCount + failedCount) / msg.agents.length) * 100}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+              {isSynth && (
+                <div className="mt-2 flex items-center gap-2 text-xs text-zinc-400">
+                  <span className="inline-flex gap-0.5">
+                    <span className="animate-bounce">·</span>
+                    <span className="animate-bounce [animation-delay:75ms]">·</span>
+                    <span className="animate-bounce [animation-delay:150ms]">·</span>
+                  </span>
+                  {isLatex ? "Composing LaTeX paper…" : "Synthesising answer…"}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Done: collapsible agent summary */}
+          {isDone && msg.agents.length > 0 && (
+            <div className="mb-4">
+              <button
+                onClick={() => setShowAgents((v) => !v)}
+                className="flex items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900/40 px-3 py-2 text-xs text-zinc-500 transition-colors hover:border-zinc-700 hover:text-zinc-300"
+              >
+                <span>{msg.agents.length} agents · {totalSteps} steps{failedCount > 0 ? ` · ${failedCount} failed` : ""}</span>
+                <span>{showAgents ? "▲" : "▼"}</span>
+              </button>
+              {showAgents && (
+                <div className={`mt-2 grid gap-2 ${msg.agents.length === 1 ? "grid-cols-1" : msg.agents.length === 2 ? "grid-cols-2" : "grid-cols-2 sm:grid-cols-3"}`}>
+                  {msg.agents.map((a) => <AgentCard key={a.id} agent={a} />)}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Synthesis / answer */}
+          {msg.synthesis && (
+            <div>
+              {isLatex ? (
+                <LaTeXViewer
+                  text={msg.synthesis}
+                  streaming={!msg.synthesisDone}
+                  onDownload={msg.synthesisDone ? downloadSynthesis : undefined}
+                />
+              ) : (
+                <div className="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900">
+                  <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-2.5">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm">✨</span>
+                      <p className="text-xs font-semibold text-white">Answer</p>
+                      {!msg.synthesisDone && (
+                        <span className="flex gap-0.5 text-xs text-zinc-500">
+                          <span className="animate-bounce">·</span>
+                          <span className="animate-bounce [animation-delay:75ms]">·</span>
+                          <span className="animate-bounce [animation-delay:150ms]">·</span>
+                        </span>
+                      )}
+                    </div>
+                    {msg.synthesisDone && (
+                      <div className="flex gap-1.5">
+                        <button
+                          onClick={downloadSynthesis}
+                          className="rounded border border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-400 transition-colors hover:border-zinc-500 hover:text-white"
+                        >
+                          ↓ .md
+                        </button>
+                        <CopyButton text={msg.synthesis} />
+                      </div>
+                    )}
+                  </div>
+                  <div className="px-5 py-5">
+                    {msg.synthesisDone ? (
+                      <ReactMarkdown remarkPlugins={[remarkGfm]} components={md}>{msg.synthesis}</ReactMarkdown>
+                    ) : (
+                      <p className="whitespace-pre-wrap text-sm leading-relaxed text-zinc-300">{msg.synthesis}</p>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Error */}
+          {msg.phase === "error" && msg.errorMessage && (
+            <div className="rounded-xl border border-red-900 bg-red-950/40 px-4 py-3">
+              <p className="text-sm font-medium text-red-400">Something went wrong</p>
+              <p className="mt-1 text-xs text-red-400/80">{msg.errorMessage}</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── ReportView (viewing a past report) ───────────────────────────────────────
+
+function ReportView({ report }: { report: Report }) {
+  const isLatex = report.type === "latex";
+
+  function download() {
+    const ext = isLatex ? "tex" : "md";
+    const mime = isLatex ? "application/x-tex" : "text/markdown";
+    const blob = new Blob([report.content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `report.${ext}`; a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* User bubble */}
+      <div className="flex justify-end">
+        <div className="max-w-lg rounded-2xl rounded-br-sm bg-zinc-800 px-4 py-3">
+          <div className="mb-1 flex items-center gap-1.5">
+            <span className="text-[10px] text-zinc-500">{isLatex ? "📐 LaTeX" : "📄 Research"}</span>
+            <span className="text-[10px] text-zinc-600">· {fmtTime(report.created_at)}</span>
+          </div>
+          <p className="text-sm text-white">{report.prompt}</p>
+        </div>
+      </div>
+
+      {/* AI response */}
+      <div className="flex gap-3">
+        <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-white/[0.07] text-sm">
+          ⚙
+        </div>
+        <div className="flex-1 min-w-0">
+          {isLatex ? (
+            <LaTeXViewer text={report.content} streaming={false} onDownload={download} />
+          ) : (
+            <div className="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900">
+              <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-2.5">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm">✨</span>
+                  <p className="text-xs font-semibold text-white">Answer</p>
+                </div>
+                <div className="flex gap-1.5">
+                  <button onClick={download} className="rounded border border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-400 transition-colors hover:border-zinc-500 hover:text-white">↓ .md</button>
+                  <CopyButton text={report.content} />
+                </div>
+              </div>
+              <div className="px-5 py-5">
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={md}>{report.content}</ReactMarkdown>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── WelcomeScreen ────────────────────────────────────────────────────────────
+
+const EXAMPLES: Record<Mode, string[]> = {
+  research: [
+    "Research the top 5 AI coding tools in 2025 and write a comparison",
+    "Find recent news about climate tech startups and summarise key trends",
+    "Look up the latest Next.js 16 features and draft a blog post outline",
+  ],
+  latex: [
+    "Write an academic paper on the impact of LLMs on software engineering",
+    "Produce a research paper surveying advances in quantum computing",
+    "Write a paper on the environmental impact of data centres",
+  ],
+};
+
+function WelcomeScreen({ mode, onExample }: { mode: Mode; onExample: (s: string) => void }) {
+  return (
+    <div className="flex flex-col items-center justify-center px-6 py-20 text-center">
+      <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-white/[0.07] text-2xl">⚙</div>
+      <h2 className="text-xl font-semibold text-white">What should your agents do?</h2>
+      <p className="mt-2 max-w-sm text-sm text-zinc-400">
+        Describe any task — forge-os breaks it into a parallel team of agents and delivers one clean answer.
+      </p>
+      <div className="mt-8 flex flex-wrap justify-center gap-2">
+        {EXAMPLES[mode].map((ex) => (
+          <button
+            key={ex}
+            onClick={() => onExample(ex)}
+            className="rounded-full border border-zinc-800 bg-zinc-900 px-3.5 py-2 text-left text-xs text-zinc-400 transition-colors hover:border-zinc-700 hover:text-zinc-200"
+          >
+            {ex}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── Sidebar ──────────────────────────────────────────────────────────────────
+
+function Sidebar({
+  reports,
+  activeId,
+  onSelect,
+  onNewChat,
+  userEmail,
+  signOut,
+}: {
+  reports: Report[];
+  activeId: string | null;
+  onSelect: (id: string) => void;
+  onNewChat: () => void;
+  userEmail: string;
+  signOut: () => Promise<void>;
+}) {
+  const groups = groupByDate(reports);
+  return (
+    <aside className="flex h-full flex-col bg-[#0a0a0a]">
+      {/* Header */}
+      <div className="flex items-center px-4 py-4">
+        <span className="text-sm font-bold tracking-tight text-white">forge-os</span>
+      </div>
+
+      {/* New chat */}
+      <div className="px-3 pb-2">
+        <button
+          onClick={onNewChat}
+          className="flex w-full items-center gap-2 rounded-lg border border-white/[0.07] px-3 py-2.5 text-sm text-zinc-400 transition-all hover:bg-white/[0.05] hover:text-white"
+        >
+          <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+            <path d="M10.75 4.75a.75.75 0 0 0-1.5 0v4.5h-4.5a.75.75 0 0 0 0 1.5h4.5v4.5a.75.75 0 0 0 1.5 0v-4.5h4.5a.75.75 0 0 0 0-1.5h-4.5v-4.5Z" />
+          </svg>
+          New chat
+        </button>
+      </div>
+
+      {/* History */}
+      <div className="flex-1 overflow-y-auto px-2 py-1">
+        {groups.length === 0 && (
+          <p className="px-3 py-4 text-xs text-zinc-600">No chats yet</p>
+        )}
+        {groups.map((g) => (
+          <div key={g.label} className="mb-3">
+            <p className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-600">{g.label}</p>
+            {g.items.map((r) => (
+              <button
+                key={r.id}
+                onClick={() => onSelect(r.id)}
+                className={`w-full rounded-lg px-3 py-2 text-left text-sm transition-colors ${
+                  activeId === r.id ? "bg-white/[0.09] text-white" : "text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-200"
+                }`}
+              >
+                <p className="truncate text-[13px]">{r.prompt}</p>
+                <p className="mt-0.5 text-[10px] text-zinc-600">
+                  {r.type === "latex" ? "📐" : "📄"} {fmtTime(r.created_at)}
+                </p>
+              </button>
+            ))}
+          </div>
+        ))}
+      </div>
+
+      {/* Footer */}
+      <div className="border-t border-white/[0.06] p-3">
+        <div className="flex items-center justify-between gap-2 rounded-lg px-2 py-2">
+          <div className="min-w-0">
+            <p className="truncate text-xs text-zinc-500">{userEmail}</p>
+          </div>
+          <form action={signOut}>
+            <button type="submit" className="shrink-0 text-xs text-zinc-600 transition-colors hover:text-zinc-300">
+              Sign out
+            </button>
+          </form>
+        </div>
+      </div>
+    </aside>
+  );
+}
+
+// ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function AgentRunner({
   userId,
-  reports,
+  userEmail,
+  reports: initialReports,
+  signOut,
 }: {
   userId: string;
+  userEmail: string;
   reports: Report[];
+  signOut: () => Promise<void>;
 }) {
-  void userId; // used by PendingApprovals via API auth (cookie-based)
+  void userId;
   const router = useRouter();
-  const [mode, setMode] = useState<Mode>("research");
-  const [phase, setPhase] = useState<Phase>("idle");
-  const [prompt, setPrompt] = useState("");
-  const [plan, setPlan] = useState<string | null>(null);
-  const [agents, setAgents] = useState<AgentState[]>([]);
-  const [synthesis, setSynthesis] = useState("");
-  const [synthesisDone, setSynthesisDone] = useState(false);
-  const [activeMode, setActiveMode] = useState<Mode>("research");
-  const [showAgentDetails, setShowAgentDetails] = useState(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
 
-  const updateAgent = useCallback(
-    (id: string, patch: Partial<AgentState>) =>
-      setAgents((prev) =>
-        prev.map((a) => (a.id === id ? { ...a, ...patch } : a))
-      ),
-    []
+  // Sidebar
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [reports, setReports] = useState<Report[]>(initialReports);
+
+  // Navigation: null = active session, string = viewing a past report
+  const [viewingId, setViewingId] = useState<string | null>(null);
+
+  // Current session messages (multiple runs)
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+
+  // Input
+  const [prompt, setPrompt] = useState("");
+  const [mode, setMode] = useState<Mode>("research");
+
+  const abortRef = useRef<AbortController | null>(null);
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const isRunning = messages.some(
+    (m) => m.phase === "spawning" || m.phase === "running" || m.phase === "synthesizing"
   );
 
-  async function run() {
-    if (!prompt.trim() || phase === "running" || phase === "spawning") return;
+  // Scroll to bottom when messages update
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
 
+  const updateMsg = useCallback((id: string, patch: Partial<ChatMessage>) => {
+    setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...patch } : m)));
+  }, []);
+
+  const updateAgent = useCallback((msgId: string, agentId: string, patch: Partial<AgentState>) => {
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === msgId ? { ...m, agents: m.agents.map((a) => (a.id === agentId ? { ...a, ...patch } : a)) } : m
+      )
+    );
+  }, []);
+
+  async function handleRun() {
+    if (!prompt.trim() || isRunning) return;
+
+    const msgId = crypto.randomUUID();
     const runMode = mode;
+    const runPrompt = prompt.trim();
+    const endpoint = runMode === "latex" ? "/api/agents/latex" : "/api/agents/run";
 
-    setPlan(null);
-    setAgents([]);
-    setSynthesis("");
-    setSynthesisDone(false);
-    setShowAgentDetails(false);
-    setErrorMessage(null);
-    setActiveMode(runMode);
-    setPhase("spawning");
+    // Add message to session and switch to session view
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: msgId,
+        prompt: runPrompt,
+        mode: runMode,
+        phase: "spawning",
+        plan: null,
+        agents: [],
+        synthesis: "",
+        synthesisDone: false,
+        errorMessage: null,
+      },
+    ]);
+    setViewingId(null);
+    setPrompt("");
 
     const ctrl = new AbortController();
     abortRef.current = ctrl;
-
-    const endpoint = runMode === "latex" ? "/api/agents/latex" : "/api/agents/run";
 
     try {
       const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt }),
+        body: JSON.stringify({ prompt: runPrompt }),
         signal: ctrl.signal,
       });
 
@@ -606,7 +932,6 @@ export default function AgentRunner({
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
         buffer = lines.pop() ?? "";
@@ -614,372 +939,176 @@ export default function AgentRunner({
         for (const line of lines) {
           const trimmed = line.trim();
           if (!trimmed) continue;
-
           let event: StreamEvent;
-          try {
-            event = JSON.parse(trimmed);
-          } catch {
-            continue;
-          }
+          try { event = JSON.parse(trimmed); } catch { continue; }
 
           if (event.type === "plan") {
-            setPlan(event.data.plan);
-            setAgents(
-              event.data.agents.map((a: AgentMeta) => ({
-                ...a,
-                status: "waiting" as const,
-              }))
-            );
-            setPhase("running");
-          } else if (event.type === "agent_start") {
-            updateAgent(event.data.id, { status: "running" });
-          } else if (event.type === "agent_done") {
-            updateAgent(event.data.id, { status: "done", result: event.data.result });
-          } else if (event.type === "agent_error") {
-            updateAgent(event.data.id, {
-              status: "failed",
-              errorMessage: event.data.message,
+            updateMsg(msgId, {
+              plan: event.data.plan,
+              phase: "running",
+              agents: event.data.agents.map((a: AgentMeta) => ({ ...a, status: "waiting" as const })),
             });
+          } else if (event.type === "agent_start") {
+            updateAgent(msgId, event.data.id, { status: "running" });
+          } else if (event.type === "agent_done") {
+            updateAgent(msgId, event.data.id, { status: "done", result: event.data.result });
+          } else if (event.type === "agent_error") {
+            updateAgent(msgId, event.data.id, { status: "failed", errorMessage: event.data.message });
           } else if (event.type === "synthesis_start") {
-            setPhase("synthesizing");
+            updateMsg(msgId, { phase: "synthesizing" });
           } else if (event.type === "synthesis_chunk") {
-            setSynthesis((prev) => prev + event.data.text);
+            setMessages((prev) =>
+              prev.map((m) => (m.id === msgId ? { ...m, synthesis: m.synthesis + event.data.text } : m))
+            );
           } else if (event.type === "synthesis_done") {
-            setSynthesisDone(true);
+            updateMsg(msgId, { synthesisDone: true });
           } else if (event.type === "complete") {
-            setPhase("done");
+            updateMsg(msgId, { phase: "done" });
           } else if (event.type === "error") {
-            setErrorMessage(event.data.message);
-            setPhase("error");
+            updateMsg(msgId, { phase: "error", errorMessage: event.data.message });
           }
         }
       }
 
-      setPhase((p) => (p === "running" || p === "synthesizing" ? "done" : p));
+      updateMsg(msgId, { phase: "done" });
       router.refresh();
+      // Refresh reports list after a short delay
+      setTimeout(() => {
+        setReports((prev) => prev); // trigger re-render; router.refresh handles DB sync
+      }, 500);
     } catch (err) {
       if ((err as Error).name === "AbortError") return;
-      setErrorMessage(err instanceof Error ? err.message : "Something went wrong.");
-      setPhase("error");
+      updateMsg(msgId, { phase: "error", errorMessage: err instanceof Error ? err.message : "Something went wrong." });
     }
   }
 
-  function reset() {
+  function newChat() {
     abortRef.current?.abort();
-    setPhase("idle");
-    setPlan(null);
-    setAgents([]);
-    setSynthesis("");
-    setSynthesisDone(false);
-    setShowAgentDetails(false);
-    setErrorMessage(null);
+    setViewingId(null);
+    setMessages([]);
     setPrompt("");
+    textareaRef.current?.focus();
   }
 
-  function downloadAnswer() {
-    const isLatex = activeMode === "latex";
-    const ext = isLatex ? "tex" : "md";
-    const mime = isLatex ? "application/x-tex" : "text/plain";
-    const blob = new Blob([synthesis], { type: mime });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `answer.${ext}`;
-    a.click();
-    URL.revokeObjectURL(url);
-  }
-
-  const isActive = phase === "spawning" || phase === "running";
-  const isSynthesizing = phase === "synthesizing";
-  const doneCount = agents.filter((a) => a.status === "done").length;
-  const failedCount = agents.filter((a) => a.status === "failed").length;
-  const totalSteps = agents.reduce((s, a) => s + (a.result?.stepsExecuted ?? 0), 0);
-  const isLatexRun = activeMode === "latex";
-  const approvalsActive = isActive || isSynthesizing;
+  const viewingReport = viewingId ? reports.find((r) => r.id === viewingId) ?? null : null;
+  const showWelcome = !viewingId && messages.length === 0;
 
   return (
-    <div className="mx-auto max-w-3xl px-6 py-10">
+    <div className="flex h-screen overflow-hidden bg-[#0d0d0d] text-white">
 
-      {/* ── Prompt input ──────────────────────────────────────────────────── */}
-      <div className={phase !== "idle" ? "mb-6" : "mb-0"}>
-        {phase === "idle" && (
-          <div className="mb-6 text-center">
-            <h1 className="text-3xl font-bold text-white">
-              What should your agents do?
-            </h1>
-            <p className="mt-2 text-sm text-zinc-400">
-              Describe any task in plain English — forge-os breaks it into agents,
-              runs them in parallel, and gives you one clean answer.
-            </p>
-            <div className="mt-5 flex justify-center">
-              <ModeToggle mode={mode} onChange={setMode} />
-            </div>
-          </div>
-        )}
-
-        <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
-          <textarea
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) run();
-            }}
-            placeholder={
-              mode === "latex"
-                ? "e.g. Write an academic paper on the impact of LLMs on software engineering…"
-                : "e.g. Research the top AI tools of 2025 and write a comparison note…"
-            }
-            rows={3}
-            disabled={isActive || isSynthesizing}
-            className="w-full resize-none bg-transparent text-sm text-white placeholder-zinc-500 focus:outline-none disabled:opacity-50"
-          />
-          <div className="mt-3 flex items-center justify-between">
-            <span className="text-xs text-zinc-600">⌘ + Enter to run</span>
-            <div className="flex gap-2">
-              {(phase === "done" || phase === "error") && (
-                <button
-                  onClick={reset}
-                  className="rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-400 transition-colors hover:border-zinc-600 hover:text-white"
-                >
-                  New task
-                </button>
-              )}
-              <button
-                onClick={run}
-                disabled={!prompt.trim() || isActive || isSynthesizing}
-                className="rounded-lg bg-white px-4 py-1.5 text-xs font-semibold text-zinc-950 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                {isActive ? "Running…" : isSynthesizing ? "Synthesising…" : "Launch agents →"}
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {phase === "idle" && (
-          <div className="mt-3 flex flex-wrap gap-2">
-            {EXAMPLES[mode].map((ex) => (
-              <button
-                key={ex}
-                onClick={() => setPrompt(ex)}
-                className="rounded-full border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-left text-xs text-zinc-400 transition-colors hover:border-zinc-700 hover:text-zinc-200"
-              >
-                {ex}
-              </button>
-            ))}
-          </div>
-        )}
+      {/* ── Sidebar ───────────────────────────────────────────────────────── */}
+      <div
+        className={`shrink-0 transition-all duration-200 ${sidebarOpen ? "w-64" : "w-0 overflow-hidden"} border-r border-white/[0.06]`}
+      >
+        <Sidebar
+          reports={reports}
+          activeId={viewingId}
+          onSelect={(id) => { setViewingId(id); }}
+          onNewChat={newChat}
+          userEmail={userEmail}
+          signOut={signOut}
+        />
       </div>
 
-      {/* ── Spawning indicator ────────────────────────────────────────────── */}
-      {phase === "spawning" && (
-        <div className="mb-6 flex items-center gap-2 text-sm text-zinc-400">
-          <span className="inline-flex gap-1">
-            <span className="animate-bounce">·</span>
-            <span className="animate-bounce [animation-delay:75ms]">·</span>
-            <span className="animate-bounce [animation-delay:150ms]">·</span>
-          </span>
-          Planning your agent team…
-        </div>
-      )}
+      {/* ── Main ──────────────────────────────────────────────────────────── */}
+      <div className="flex flex-1 flex-col min-w-0">
 
-      {/* ── Pending approvals ─────────────────────────────────────────────── */}
-      <PendingApprovals active={approvalsActive} />
-
-      {/* ── Agent cards ───────────────────────────────────────────────────── */}
-      {agents.length > 0 && (isActive || isSynthesizing || phase === "done") && (
-        <div className="mb-6">
-          {(isActive || isSynthesizing) && (
-            <>
-              <div
-                className={`grid gap-2 ${
-                  agents.length === 1
-                    ? "grid-cols-1"
-                    : agents.length === 2
-                    ? "grid-cols-2"
-                    : "grid-cols-2 sm:grid-cols-3"
-                }`}
-              >
-                {agents.map((a) => (
-                  <AgentCard key={a.id} agent={a} />
-                ))}
-              </div>
-
-              {isActive && (
-                <div className="mt-3">
-                  <div className="mb-1 flex justify-between text-xs text-zinc-600">
-                    <span>
-                      {doneCount + failedCount}/{agents.length} agents done
-                    </span>
-                    <span>
-                      {Math.round(
-                        ((doneCount + failedCount) / agents.length) * 100
-                      )}
-                      %
-                    </span>
-                  </div>
-                  <div className="h-0.5 w-full rounded-full bg-zinc-800">
-                    <div
-                      className="h-0.5 rounded-full bg-blue-500 transition-all duration-500"
-                      style={{
-                        width: `${
-                          ((doneCount + failedCount) / agents.length) * 100
-                        }%`,
-                      }}
-                    />
-                  </div>
-                </div>
-              )}
-
-              {isSynthesizing && (
-                <div className="mt-3 flex items-center gap-2 text-xs text-zinc-400">
-                  <span className="inline-flex gap-0.5">
-                    <span className="animate-bounce">·</span>
-                    <span className="animate-bounce [animation-delay:75ms]">·</span>
-                    <span className="animate-bounce [animation-delay:150ms]">·</span>
-                  </span>
-                  {isLatexRun ? "Composing LaTeX paper…" : "Synthesising answer…"}
-                </div>
-              )}
-            </>
-          )}
-
-          {phase === "done" && (
-            <button
-              onClick={() => setShowAgentDetails((v) => !v)}
-              className="flex w-full items-center justify-between rounded-lg border border-zinc-800 bg-zinc-900/50 px-4 py-2.5 text-left transition-colors hover:border-zinc-700"
-            >
-              <span className="text-xs text-zinc-400">
-                <span className="font-medium text-zinc-300">
-                  {agents.length} agent{agents.length !== 1 ? "s" : ""}
-                </span>
-                {" · "}
-                {totalSteps} steps
-                {failedCount > 0 && ` · ${failedCount} failed`}
-              </span>
-              <span className="text-xs text-zinc-500">
-                {showAgentDetails ? "Hide details ↑" : "Show agent details ↓"}
-              </span>
-            </button>
-          )}
-
-          {phase === "done" && showAgentDetails && (
-            <div className="mt-2 space-y-2">
-              {plan && (
-                <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-3">
-                  <p className="mb-1 text-[10px] font-semibold uppercase tracking-widest text-zinc-600">
-                    Plan
-                  </p>
-                  <p className="text-xs leading-relaxed text-zinc-400">{plan}</p>
-                </div>
-              )}
-              <div
-                className={`grid gap-2 ${
-                  agents.length === 1
-                    ? "grid-cols-1"
-                    : agents.length === 2
-                    ? "grid-cols-2"
-                    : "grid-cols-2 sm:grid-cols-3"
-                }`}
-              >
-                {agents.map((a) => (
-                  <AgentCard key={a.id} agent={a} />
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ── Answer / LaTeX panel ──────────────────────────────────────────── */}
-      {synthesis && (
-        <div className="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900">
-          <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
-            <div className="flex items-center gap-2">
-              <span className="text-base">{isLatexRun ? "📐" : "✨"}</span>
-              <p className="text-sm font-semibold text-white">
-                {isLatexRun ? "LaTeX Paper" : "Answer"}
-              </p>
-              {!synthesisDone && (
-                <span className="flex items-center gap-0.5 text-xs text-zinc-500">
-                  <span className="animate-bounce">·</span>
-                  <span className="animate-bounce [animation-delay:75ms]">·</span>
-                  <span className="animate-bounce [animation-delay:150ms]">·</span>
-                </span>
-              )}
-            </div>
-            {synthesisDone && (
-              <div className="flex gap-2">
-                {isLatexRun && (
-                  <button
-                    onClick={() => openInOverleaf(synthesis)}
-                    className="rounded-md border border-blue-900 bg-blue-950/40 px-2.5 py-1 text-xs text-blue-400 transition-colors hover:bg-blue-900/40 hover:text-blue-300"
-                  >
-                    ↗ Preview PDF
-                  </button>
-                )}
-                <button
-                  onClick={downloadAnswer}
-                  className="rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-400 transition-colors hover:border-zinc-500 hover:text-white"
-                >
-                  ↓ {isLatexRun ? "Download .tex" : "Download .md"}
-                </button>
-                <CopyButton text={synthesis} />
-              </div>
-            )}
-          </div>
-
-          <div className="px-5 py-5">
-            {isLatexRun ? (
-              <LaTeXViewer text={synthesis} streaming={!synthesisDone} />
-            ) : synthesisDone ? (
-              <ReactMarkdown remarkPlugins={[remarkGfm]} components={md}>
-                {synthesis}
-              </ReactMarkdown>
-            ) : (
-              <p className="whitespace-pre-wrap text-sm leading-relaxed text-zinc-300">
-                {synthesis}
-              </p>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* ── Done bar ──────────────────────────────────────────────────────── */}
-      {phase === "done" && synthesis && (
-        <div className="mt-4 flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-900/50 px-4 py-3">
-          <p className="text-xs text-zinc-500">
-            {doneCount} agent{doneCount !== 1 ? "s" : ""} · {totalSteps} steps
-          </p>
+        {/* Top bar */}
+        <div className="flex items-center gap-3 border-b border-white/[0.06] px-4 py-3">
           <button
-            onClick={reset}
-            className="rounded-lg bg-white px-4 py-1.5 text-xs font-semibold text-zinc-950 transition-colors hover:bg-zinc-100"
+            onClick={() => setSidebarOpen((v) => !v)}
+            className="rounded-lg p-1.5 text-zinc-500 transition-colors hover:bg-white/[0.06] hover:text-white"
+            title="Toggle sidebar"
           >
-            New task →
+            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5M3.75 17.25h16.5" />
+            </svg>
           </button>
-        </div>
-      )}
 
-      {/* ── Error ─────────────────────────────────────────────────────────── */}
-      {phase === "error" && errorMessage && (
-        <div className="rounded-xl border border-red-900 bg-red-950/40 px-5 py-4">
-          <p className="text-sm font-medium text-red-400">Something went wrong</p>
-          <p className="mt-1 text-xs text-red-400/80">{errorMessage}</p>
+          <p className="truncate text-sm text-zinc-500">
+            {viewingReport
+              ? viewingReport.prompt.slice(0, 60) + (viewingReport.prompt.length > 60 ? "…" : "")
+              : messages.length > 0
+              ? messages[messages.length - 1].prompt.slice(0, 60) + "…"
+              : "New chat"}
+          </p>
         </div>
-      )}
 
-      {/* ── Past reports ──────────────────────────────────────────────────── */}
-      {reports.length > 0 && phase === "idle" && (
-        <div className="mt-12">
-          <h2 className="mb-3 text-xs font-semibold uppercase tracking-widest text-zinc-600">
-            Past reports
-          </h2>
-          <div className="space-y-2">
-            {reports.map((r) => (
-              <ReportItem key={r.id} report={r} />
-            ))}
+        {/* Scroll area */}
+        <div className="flex-1 overflow-y-auto">
+          {showWelcome ? (
+            <WelcomeScreen mode={mode} onExample={(ex) => { setPrompt(ex); textareaRef.current?.focus(); }} />
+          ) : viewingReport ? (
+            <div className="mx-auto max-w-3xl px-4 py-8">
+              <ReportView report={viewingReport} />
+            </div>
+          ) : (
+            <div className="mx-auto max-w-3xl space-y-10 px-4 py-8">
+              {messages.map((msg) => (
+                <MessageThread key={msg.id} msg={msg} />
+              ))}
+              <div ref={bottomRef} />
+            </div>
+          )}
+        </div>
+
+        {/* ── Input bar ──────────────────────────────────────────────────── */}
+        <div className="border-t border-white/[0.06] px-4 py-4">
+          <div className="mx-auto max-w-3xl">
+            <div className="overflow-hidden rounded-2xl border border-white/[0.1] bg-zinc-900 focus-within:border-white/[0.2] transition-colors">
+              <textarea
+                ref={textareaRef}
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) handleRun();
+                }}
+                placeholder={
+                  mode === "latex"
+                    ? "Write an academic paper on…"
+                    : "Research, compare, summarise anything…"
+                }
+                rows={3}
+                disabled={isRunning}
+                className="w-full resize-none bg-transparent px-4 pt-4 text-sm text-white placeholder-zinc-500 focus:outline-none disabled:opacity-50"
+              />
+              <div className="flex items-center justify-between px-3 pb-3">
+                {/* Mode toggle */}
+                <div className="inline-flex rounded-lg border border-white/[0.07] bg-white/[0.03] p-0.5">
+                  <button
+                    onClick={() => setMode("research")}
+                    className={`rounded-md px-3 py-1.5 text-xs font-medium transition-all ${
+                      mode === "research" ? "bg-white text-zinc-950 shadow-sm" : "text-zinc-400 hover:text-zinc-200"
+                    }`}
+                  >
+                    📄 Research
+                  </button>
+                  <button
+                    onClick={() => setMode("latex")}
+                    className={`rounded-md px-3 py-1.5 text-xs font-medium transition-all ${
+                      mode === "latex" ? "bg-white text-zinc-950 shadow-sm" : "text-zinc-400 hover:text-zinc-200"
+                    }`}
+                  >
+                    📐 LaTeX
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <span className="hidden text-xs text-zinc-600 sm:block">⌘ + Enter</span>
+                  <button
+                    onClick={handleRun}
+                    disabled={!prompt.trim() || isRunning}
+                    className="rounded-xl bg-white px-4 py-2 text-xs font-semibold text-zinc-950 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {isRunning ? "Running…" : "Launch →"}
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
-      )}
+
+      </div>
     </div>
   );
 }

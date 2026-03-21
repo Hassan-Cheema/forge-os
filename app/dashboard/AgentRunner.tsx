@@ -373,7 +373,11 @@ function LaTeXViewer({ text, streaming, onDownload }: { text: string; streaming:
   }
 
   function printPdf() {
-    iframeRef.current?.contentWindow?.print();
+    const w = window.open("about:blank", "_blank");
+    if (!w) return;
+    w.document.write(buildPreviewHtml(text));
+    w.document.close();
+    w.onload = () => { w.print(); };
   }
 
   return (
@@ -753,14 +757,16 @@ function ReportView({ report }: { report: Report }) {
 
 const EXAMPLES: Record<Mode, string[]> = {
   research: [
-    "Research the top 5 AI coding tools in 2025 and write a comparison",
-    "Find recent news about climate tech startups and summarise key trends",
-    "Look up the latest Next.js 16 features and draft a blog post outline",
+    "Compare the top 5 AI coding assistants in 2025 — pricing, features, and limitations",
+    "Summarise the latest breakthroughs in quantum computing and their practical impact",
+    "Research the current state of autonomous vehicles and which companies lead",
+    "Analyse the economic impact of generative AI on creative industries",
   ],
   latex: [
-    "Write an academic paper on the impact of LLMs on software engineering",
-    "Produce a research paper surveying advances in quantum computing",
-    "Write a paper on the environmental impact of data centres",
+    "Write an academic paper on the societal impact of large language models",
+    "Produce a research paper on advances in renewable energy storage technology",
+    "Write a paper on the future of autonomous systems in healthcare",
+    "Survey recent progress in protein folding and its implications for drug discovery",
   ],
 };
 
@@ -898,13 +904,22 @@ export default function AgentRunner({
   const [prompt, setPrompt] = useState("");
   const [mode, setMode] = useState<Mode>("research");
 
+  // File attachment
+  const [attachment, setAttachment] = useState<{ name: string; text: string; chars: number } | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const isRunning = messages.some(
     (m) => m.phase === "spawning" || m.phase === "running" || m.phase === "synthesizing"
   );
+  const runningMsgId = messages.find(
+    (m) => m.phase === "spawning" || m.phase === "running" || m.phase === "synthesizing"
+  )?.id ?? null;
 
   // Scroll to bottom when messages update
   useEffect(() => {
@@ -922,6 +937,27 @@ export default function AgentRunner({
       )
     );
   }, []);
+
+  async function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setUploadError(null);
+    setUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch("/api/extract-text", { method: "POST", body: fd });
+      const json = await res.json();
+      if (!res.ok) { setUploadError(json.error ?? "Upload failed."); return; }
+      setAttachment({ name: json.filename, text: json.text, chars: json.chars });
+      if (json.wasTruncated) setUploadError(`File truncated to 60,000 characters for processing.`);
+    } catch {
+      setUploadError("Upload failed. Please try again.");
+    } finally {
+      setUploading(false);
+    }
+  }
 
   async function handleRun() {
     if (!prompt.trim() || isRunning) return;
@@ -948,6 +984,9 @@ export default function AgentRunner({
     ]);
     setViewingId(null);
     setPrompt("");
+    const runMaterial = attachment;
+    setAttachment(null);
+    setUploadError(null);
 
     const ctrl = new AbortController();
     abortRef.current = ctrl;
@@ -956,7 +995,7 @@ export default function AgentRunner({
       const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: runPrompt }),
+        body: JSON.stringify({ prompt: runPrompt, materialText: runMaterial?.text ?? "" }),
         signal: ctrl.signal,
       });
 
@@ -1017,7 +1056,10 @@ export default function AgentRunner({
         setReports((prev) => prev); // trigger re-render; router.refresh handles DB sync
       }, 500);
     } catch (err) {
-      if ((err as Error).name === "AbortError") return;
+      if ((err as Error).name === "AbortError") {
+        updateMsg(msgId, { phase: "error", errorMessage: "Cancelled." });
+        return;
+      }
       updateMsg(msgId, { phase: "error", errorMessage: err instanceof Error ? err.message : "Something went wrong." });
     }
   }
@@ -1095,7 +1137,45 @@ export default function AgentRunner({
         {/* ── Input bar ──────────────────────────────────────────────────── */}
         <div className="border-t border-white/[0.06] px-4 py-4">
           <div className="mx-auto max-w-3xl">
+
+            {/* Hidden file input */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".pdf,.txt,.md,.tex,.csv,.json"
+              className="hidden"
+              onChange={handleFileSelect}
+            />
+
+            {/* Upload error */}
+            {uploadError && (
+              <div className="mb-2 flex items-center gap-2 rounded-lg border border-yellow-900/60 bg-yellow-950/20 px-3 py-2">
+                <span className="text-xs text-yellow-400">{uploadError}</span>
+                <button onClick={() => setUploadError(null)} className="ml-auto text-xs text-zinc-500 hover:text-white">✕</button>
+              </div>
+            )}
+
             <div className="overflow-hidden rounded-2xl border border-white/[0.1] bg-zinc-900 focus-within:border-white/[0.2] transition-colors">
+
+              {/* Attached file chip */}
+              {attachment && (
+                <div className="flex items-center gap-2 border-b border-white/[0.06] px-4 py-2.5">
+                  <div className="flex items-center gap-2 rounded-lg border border-blue-900/50 bg-blue-950/30 px-3 py-1.5">
+                    <span className="text-sm">📚</span>
+                    <div className="min-w-0">
+                      <p className="max-w-[200px] truncate text-xs font-medium text-blue-300">{attachment.name}</p>
+                      <p className="text-[10px] text-blue-500">{(attachment.chars / 1000).toFixed(1)}k chars · will be analyzed</p>
+                    </div>
+                    <button
+                      onClick={() => { setAttachment(null); setUploadError(null); }}
+                      className="ml-1 shrink-0 text-xs text-zinc-500 transition-colors hover:text-white"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <textarea
                 ref={textareaRef}
                 value={prompt}
@@ -1104,7 +1184,9 @@ export default function AgentRunner({
                   if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) handleRun();
                 }}
                 placeholder={
-                  mode === "latex"
+                  attachment
+                    ? "Describe what you want the agents to do with your material…"
+                    : mode === "latex"
                     ? "Write an academic paper on…"
                     : "Research, compare, summarise anything…"
                 }
@@ -1113,38 +1195,80 @@ export default function AgentRunner({
                 className="w-full resize-none bg-transparent px-4 pt-4 text-sm text-white placeholder-zinc-500 focus:outline-none disabled:opacity-50"
               />
               <div className="flex items-center justify-between px-3 pb-3">
-                {/* Mode toggle */}
-                <div className="inline-flex rounded-lg border border-white/[0.07] bg-white/[0.03] p-0.5">
+                <div className="flex items-center gap-2">
+                  {/* Attach file button */}
                   <button
-                    onClick={() => setMode("research")}
-                    className={`rounded-md px-3 py-1.5 text-xs font-medium transition-all ${
-                      mode === "research" ? "bg-white text-zinc-950 shadow-sm" : "text-zinc-400 hover:text-zinc-200"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={isRunning || uploading}
+                    title="Attach file (PDF, TXT, MD, TEX, CSV)"
+                    className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs transition-all disabled:opacity-40 ${
+                      attachment
+                        ? "border-blue-800 bg-blue-950/40 text-blue-400"
+                        : "border-white/[0.07] text-zinc-500 hover:border-white/[0.15] hover:text-zinc-300"
                     }`}
                   >
-                    📄 Research
+                    {uploading ? (
+                      <span className="flex gap-0.5">
+                        <span className="animate-bounce text-[10px]">·</span>
+                        <span className="animate-bounce text-[10px] [animation-delay:75ms]">·</span>
+                        <span className="animate-bounce text-[10px] [animation-delay:150ms]">·</span>
+                      </span>
+                    ) : (
+                      <svg className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
+                        <path fillRule="evenodd" d="M15.621 4.379a3 3 0 0 0-4.242 0l-7 7a1.5 1.5 0 0 0 2.122 2.121l7-7a.5.5 0 0 1 .707.708l-7 7a2.5 2.5 0 0 1-3.536-3.536l7-7a4.5 4.5 0 0 1 6.364 6.364l-7 7a6.5 6.5 0 0 1-9.192-9.193l7-7.001a.75.75 0 0 1 1.061 1.06l-7 7.001A5 5 0 0 0 8.96 16.55l7-7a3 3 0 0 0 0-4.243Z" clipRule="evenodd" />
+                      </svg>
+                    )}
+                    <span>{uploading ? "Reading…" : "Attach"}</span>
                   </button>
-                  <button
-                    onClick={() => setMode("latex")}
-                    className={`rounded-md px-3 py-1.5 text-xs font-medium transition-all ${
-                      mode === "latex" ? "bg-white text-zinc-950 shadow-sm" : "text-zinc-400 hover:text-zinc-200"
-                    }`}
-                  >
-                    📐 LaTeX
-                  </button>
+
+                  {/* Mode toggle */}
+                  <div className="inline-flex rounded-lg border border-white/[0.07] bg-white/[0.03] p-0.5">
+                    <button
+                      onClick={() => setMode("research")}
+                      className={`rounded-md px-3 py-1.5 text-xs font-medium transition-all ${
+                        mode === "research" ? "bg-white text-zinc-950 shadow-sm" : "text-zinc-400 hover:text-zinc-200"
+                      }`}
+                    >
+                      📄 Research
+                    </button>
+                    <button
+                      onClick={() => setMode("latex")}
+                      className={`rounded-md px-3 py-1.5 text-xs font-medium transition-all ${
+                        mode === "latex" ? "bg-white text-zinc-950 shadow-sm" : "text-zinc-400 hover:text-zinc-200"
+                      }`}
+                    >
+                      📐 LaTeX
+                    </button>
+                  </div>
                 </div>
 
                 <div className="flex items-center gap-2">
                   <span className="hidden text-xs text-zinc-600 sm:block">⌘ + Enter</span>
-                  <button
-                    onClick={handleRun}
-                    disabled={!prompt.trim() || isRunning}
-                    className="rounded-xl bg-white px-4 py-2 text-xs font-semibold text-zinc-950 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-40"
-                  >
-                    {isRunning ? "Running…" : "Launch →"}
-                  </button>
+                  {isRunning ? (
+                    <button
+                      onClick={() => {
+                        abortRef.current?.abort();
+                        if (runningMsgId) updateMsg(runningMsgId, { phase: "error", errorMessage: "Cancelled." });
+                      }}
+                      className="rounded-xl border border-zinc-700 px-4 py-2 text-xs font-semibold text-zinc-300 transition-colors hover:border-red-700 hover:text-red-400"
+                    >
+                      ✕ Stop
+                    </button>
+                  ) : (
+                    <button
+                      onClick={handleRun}
+                      disabled={!prompt.trim()}
+                      className="rounded-xl bg-white px-4 py-2 text-xs font-semibold text-zinc-950 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      Launch →
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
+            <p className="mt-2 text-center text-[10px] text-zinc-700">
+              Attach PDF, TXT, MD, TEX, or CSV · up to 10 MB · analyzed by a dedicated agent
+            </p>
           </div>
         </div>
 

@@ -1,7 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { NextRequest } from "next/server";
 import { createClient, createServiceClient } from "@/lib/supabase/server";
-import { createAgentSpawner } from "@/lib/agents/agent-spawner";
+import { createAgentSpawner, getAllTools } from "@/lib/agents/agent-spawner";
+import { createBaseAgent } from "@/lib/agents/base-agent";
 
 // Allow up to 5 minutes on Vercel Pro; Hobby will cap at 60s
 export const maxDuration = 300;
@@ -60,6 +61,7 @@ export async function POST(req: NextRequest) {
 
   const body = await req.json().catch(() => ({}));
   const prompt: string = body.prompt?.trim() ?? "";
+  const materialText: string = body.materialText?.trim() ?? "";
 
   if (!prompt) {
     return new Response(JSON.stringify({ error: "prompt is required" }), {
@@ -86,7 +88,35 @@ export async function POST(req: NextRequest) {
           userRiskLimit: 6,
         });
 
-        const spawnResult = await spawner.spawn(prompt);
+        const spawnResult = await spawner.spawn(prompt, materialText || undefined);
+
+        // ── Material Analyzer agent (injected when file is uploaded) ──────────
+        if (materialText) {
+          const materialId = crypto.randomUUID();
+          const materialInstance = createBaseAgent({
+            id: materialId,
+            userId: user.id,
+            name: "Material Analyzer",
+            goal: "Analyze the provided research materials in full detail. Extract: (1) main thesis and central arguments, (2) all key data points, statistics, and evidence, (3) methodology and approach, (4) conclusions and recommendations, (5) important sources and references cited. Produce a thorough structured summary.",
+            tools: getAllTools().filter((t) => t.name === "save_note"),
+            systemPrompt: `UPLOADED RESEARCH MATERIALS:\n\n${materialText}\n\n---\nAnalyze the above materials thoroughly. Your entire analysis must be grounded in this document. Do not use web search — the material is fully provided above.`,
+            model: "claude-sonnet-4-6",
+            maxSteps: 4,
+            userRiskLimit: 6,
+            supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL!,
+            supabaseServiceKey: process.env.SUPABASE_SERVICE_ROLE_KEY!,
+            anthropicApiKey: process.env.ANTHROPIC_API_KEY!,
+          });
+          spawnResult.agents.unshift({
+            id: materialId,
+            name: "Material Analyzer",
+            goal: "Analyze uploaded research materials",
+            emoji: "📚",
+            status: "ready",
+            instance: materialInstance,
+          });
+          spawnResult.totalAgents = spawnResult.agents.length;
+        }
 
         send({
           type: "plan",
@@ -125,11 +155,16 @@ export async function POST(req: NextRequest) {
         if (completedAgents.length > 0) {
           send({ type: "synthesis_start", data: {} });
 
-          const agentContext = completedAgents
+          // Put Material Analyzer first so synthesis can use it as the foundation
+          const sorted = [
+            ...completedAgents.filter((a) => a.name === "Material Analyzer"),
+            ...completedAgents.filter((a) => a.name !== "Material Analyzer"),
+          ];
+          const agentContext = sorted
             .map(({ name, emoji, result }) => {
-              const lines: string[] = [`## ${emoji} ${name}`, result.summary.slice(0, 2500)];
+              const lines: string[] = [`## ${emoji} ${name}`, result.summary.slice(0, 5000)];
               for (const art of result.artifacts) {
-                lines.push(`### ${art.title}\n${art.content.slice(0, 3000)}`);
+                lines.push(`### ${art.title}\n${art.content.slice(0, 6000)}`);
               }
               return lines.join("\n\n");
             })
@@ -137,8 +172,8 @@ export async function POST(req: NextRequest) {
 
           const synthesisStream = anthropic.messages.stream({
             model: "claude-sonnet-4-6",
-            max_tokens: 4096,
-            system: `You are an academic LaTeX paper generator. Produce a complete, error-free LaTeX document from the research provided.
+            max_tokens: 8192,
+            system: `You are an expert academic writer. Produce a complete, publication-quality LaTeX paper from the research findings below.
 
 MANDATORY RULES — violating any rule will break the document:
 
@@ -153,7 +188,7 @@ MANDATORY RULES — violating any rule will break the document:
    \\begin{document}
    \\maketitle
    \\begin{abstract} ... \\end{abstract}
-   (at least 4 \\section{Title} blocks with substantial prose)
+   (at least 6 \\section{Title} blocks — each with 4-6 substantial paragraphs with specific facts, data, and analysis)
    \\begin{thebibliography}{99} ... \\end{thebibliography}
    \\end{document}
 6. Citations: write them as inline text like (Author, Year) — do NOT use \\cite{} commands.
@@ -165,7 +200,8 @@ MANDATORY RULES — violating any rule will break the document:
 9. Special characters in plain text — always escape:
    & → \\&    % → \\%    # → \\#    _ → \\_    ^ → \\^{}
    Never use bare & % # _ ^ in text paragraphs.
-10. Every \\begin{X} must have exactly one \\end{X}. Final line: \\end{document}.`,
+10. Every \\begin{X} must have exactly one \\end{X}. Final line: \\end{document}.
+11. Write a COMPLETE paper — do not truncate. Every section must be fully written. The bibliography must have at least 10 entries.`,
             messages: [
               {
                 role: "user",

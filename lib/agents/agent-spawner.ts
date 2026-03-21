@@ -246,9 +246,10 @@ export class AgentSpawner {
   /**
    * Decomposes a user prompt into 2–5 agents and creates their BaseAgent instances.
    * Does NOT run them — call runAll() for that.
+   * @param materialContext Optional hint that uploaded materials exist — agents are asked to do complementary research.
    */
-  async spawn(userPrompt: string): Promise<SpawnResult> {
-    const decomposed = await this.decompose(userPrompt);
+  async spawn(userPrompt: string, materialContext?: string): Promise<SpawnResult> {
+    const decomposed = await this.decompose(userPrompt, materialContext);
 
     const agents: SpawnedAgent[] = decomposed.agents.map((plan) => {
       const id = crypto.randomUUID();
@@ -321,10 +322,14 @@ export class AgentSpawner {
    * Asks Claude to decompose the user prompt into a team of 2–5 specialist agents.
    * Uses tool_choice to guarantee structured JSON output.
    */
-  private async decompose(userPrompt: string): Promise<DecomposedPlan> {
+  private async decompose(userPrompt: string, materialContext?: string): Promise<DecomposedPlan> {
     const availableTools = getAllTools()
       .map((t) => `${t.name} (${t.category}) — ${t.description}`)
       .join("\n");
+
+    const materialHint = materialContext
+      ? `\n\nNOTE: The user has uploaded research materials that will be analyzed by a dedicated Material Analyzer agent (already created). Design the remaining agents to COMPLEMENT this analysis — focus on finding additional recent data, alternative perspectives, and supporting evidence through web research. Do NOT create an agent that only summarizes documents.`
+      : "";
 
     const response = await this.anthropic.messages.create({
       model: "claude-sonnet-4-6",
@@ -378,7 +383,7 @@ Each agent should have:
 Available tools:
 ${availableTools}
 
-User request: ${userPrompt}`,
+User request: ${userPrompt}${materialHint}`,
         },
       ],
     });

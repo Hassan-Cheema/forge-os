@@ -47,6 +47,8 @@ export interface BaseAgentConfig {
   maxSteps?: number;
   /** Extra instructions prepended to the system prompt */
   systemPrompt?: string;
+  /** Model override. Defaults to claude-haiku-4-5-20251001 (fast). Use claude-sonnet-4-6 for analysis-heavy tasks. */
+  model?: string;
   supabaseUrl: string;
   supabaseServiceKey: string;
   anthropicApiKey: string;
@@ -128,8 +130,8 @@ export class BaseAgent {
         this.log(`Step ${steps}/${maxSteps}`);
 
         const response = await this.anthropic.messages.create({
-          model: "claude-sonnet-4-6",
-          max_tokens: 2048,
+          model: this.config.model ?? "claude-haiku-4-5-20251001",
+          max_tokens: 3000,
           system: this.buildSystemPrompt(),
           tools: this.buildClaudeTools(),
           messages,
@@ -293,17 +295,18 @@ export class BaseAgent {
   }
 
   private buildSystemPrompt(): string {
-    const base = `You are ${this.config.name}, an autonomous AI agent.
+    const base = `You are ${this.config.name}, an autonomous AI research agent.
 
 Your goal: ${this.config.goal}
 
 Rules:
-- Complete the goal in as few steps as possible — 3 to 5 steps is ideal.
-- For research tasks: run 1–2 searches, read at most 2 pages, then synthesise. Do NOT keep fetching new URLs.
-- Once you have enough information to complete the goal, STOP using tools immediately and write your final answer.
-- Your final message MUST contain the complete, useful result in full — not a brief mention that a file was created.
-- If a tool call is blocked or queued, acknowledge it and continue with what you can.
-- Be concise in tool inputs; never pass more data than needed.`;
+- Complete your goal in 4–6 focused steps.
+- For research tasks: run 2–4 targeted searches using specific keywords, read 2–3 of the most relevant pages, then write a detailed synthesis.
+- Your final message MUST be a comprehensive summary with specific facts, statistics, data points, examples, and findings — at least 500 words. Include source URLs where possible.
+- Save detailed notes using save_note with the full content (not brief summaries).
+- Once you have gathered sufficient data, STOP using tools and write your complete final report.
+- If a tool is blocked or queued, continue with other tools.
+- Be specific in search queries; use different query angles to get diverse results.`;
 
     return this.config.systemPrompt ? `${this.config.systemPrompt}\n\n${base}` : base;
   }

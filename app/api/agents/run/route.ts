@@ -1,7 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { NextRequest } from "next/server";
 import { createClient, createServiceClient } from "@/lib/supabase/server";
-import { createAgentSpawner } from "@/lib/agents/agent-spawner";
+import { createAgentSpawner, getAllTools } from "@/lib/agents/agent-spawner";
+import { createBaseAgent } from "@/lib/agents/base-agent";
 
 // Allow up to 5 minutes on Vercel Pro; Hobby will cap at 60s
 export const maxDuration = 300;
@@ -60,6 +61,7 @@ export async function POST(req: NextRequest) {
 
   const body = await req.json().catch(() => ({}));
   const prompt: string = body.prompt?.trim() ?? "";
+  const materialText: string = body.materialText?.trim() ?? "";
 
   if (!prompt) {
     return new Response(JSON.stringify({ error: "prompt is required" }), {
@@ -86,7 +88,35 @@ export async function POST(req: NextRequest) {
           userRiskLimit: 6,
         });
 
-        const spawnResult = await spawner.spawn(prompt);
+        const spawnResult = await spawner.spawn(prompt, materialText || undefined);
+
+        // ── Material Analyzer agent (injected when file is uploaded) ──────────
+        if (materialText) {
+          const materialId = crypto.randomUUID();
+          const materialInstance = createBaseAgent({
+            id: materialId,
+            userId: user.id,
+            name: "Material Analyzer",
+            goal: "Analyze the provided research materials in full detail. Extract: (1) main thesis and arguments, (2) all key data, statistics, and evidence, (3) methodology, (4) conclusions and recommendations, (5) important references and sources. Produce a thorough structured summary.",
+            tools: getAllTools().filter((t) => t.name === "save_note"),
+            systemPrompt: `UPLOADED RESEARCH MATERIALS:\n\n${materialText}\n\n---\nAnalyze the above materials thoroughly. Your entire analysis must be grounded in this document. Do not use web search — the material is fully provided above.`,
+            model: "claude-sonnet-4-6",
+            maxSteps: 4,
+            userRiskLimit: 6,
+            supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL!,
+            supabaseServiceKey: process.env.SUPABASE_SERVICE_ROLE_KEY!,
+            anthropicApiKey: process.env.ANTHROPIC_API_KEY!,
+          });
+          spawnResult.agents.unshift({
+            id: materialId,
+            name: "Material Analyzer",
+            goal: "Analyze uploaded research materials",
+            emoji: "📚",
+            status: "ready",
+            instance: materialInstance,
+          });
+          spawnResult.totalAgents = spawnResult.agents.length;
+        }
 
         send({
           type: "plan",
@@ -127,11 +157,16 @@ export async function POST(req: NextRequest) {
 
           // Build a compact context from all agent outputs (cap each to avoid
           // hitting token limits).
-          const agentContext = completedAgents
+          // Put Material Analyzer first so synthesis can use it as the foundation
+          const sorted = [
+            ...completedAgents.filter((a) => a.name === "Material Analyzer"),
+            ...completedAgents.filter((a) => a.name !== "Material Analyzer"),
+          ];
+          const agentContext = sorted
             .map(({ name, emoji, result }) => {
-              const lines: string[] = [`## ${emoji} ${name}`, result.summary.slice(0, 2500)];
+              const lines: string[] = [`## ${emoji} ${name}`, result.summary.slice(0, 5000)];
               for (const art of result.artifacts) {
-                lines.push(`### ${art.title}\n${art.content.slice(0, 3000)}`);
+                lines.push(`### ${art.title}\n${art.content.slice(0, 6000)}`);
               }
               return lines.join("\n\n");
             })
@@ -139,19 +174,19 @@ export async function POST(req: NextRequest) {
 
           const synthesisStream = anthropic.messages.stream({
             model: "claude-sonnet-4-6",
-            max_tokens: 4096,
+            max_tokens: 8192,
             system:
-              "You are a synthesis engine. Your job is to merge the outputs of multiple AI agents into one single, complete, well-formatted answer. Present the actual content — not a description of what agents did. Remove all meta-commentary such as 'the agent created...' or 'I saved a note...'. Format in clean markdown.",
+              "You are an expert research synthesizer. Merge all agent findings into a comprehensive, authoritative report. Rules: (1) Write substantive content with specific facts, statistics, and examples from the research. (2) Use clean markdown: ## headings, bullet points, **bold** key terms, numbered lists where appropriate. (3) Start with a brief executive summary. (4) Remove ALL agent meta-commentary — present the actual findings as your own analysis. (5) Be thorough and detailed; aim for at least 800 words of substantive content.",
             messages: [
               {
                 role: "user",
                 content: `User's original request: "${prompt}"
 
-The following agents worked on this task:
+Agent research findings:
 
 ${agentContext}
 
-Synthesise all of this into ONE definitive final answer. If research findings were gathered, present them fully. If a document or comparison was requested, write it out completely. Be comprehensive.`,
+Write the complete, comprehensive final answer now. Present all findings in full — do not summarise or truncate.`,
               },
             ],
           });

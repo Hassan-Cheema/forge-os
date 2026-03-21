@@ -43,112 +43,152 @@ interface ChatMessage {
 
 // ─── LaTeX → HTML renderer ───────────────────────────────────────────────────
 
+/** Preserve math spans before other processing so regexes don't corrupt them */
+function protectMath(text: string): { protected: string; restore: (s: string) => string } {
+  const slots: string[] = [];
+  let out = text;
+  // Display math \[...\]
+  out = out.replace(/\\\[([\s\S]*?)\\\]/g, (_, m) => { slots.push(`\\[${m}\\]`); return `@@MATH${slots.length - 1}@@`; });
+  // Display math $$...$$
+  out = out.replace(/\$\$([\s\S]*?)\$\$/g, (_, m) => { slots.push(`$$${m}$$`); return `@@MATH${slots.length - 1}@@`; });
+  // Inline math $...$
+  out = out.replace(/\$([^$\n]+?)\$/g, (_, m) => { slots.push(`$${m}$`); return `@@MATH${slots.length - 1}@@`; });
+  return {
+    protected: out,
+    restore: (s: string) => s.replace(/@@MATH(\d+)@@/g, (_, i) => slots[Number(i)] ?? ""),
+  };
+}
+
 function fmt(text: string): string {
-  return text
+  // Escaped special chars → safe HTML equivalents
+  let t = text
+    .replace(/\\&/g, "&amp;")
+    .replace(/\\%/g, "%")
+    .replace(/\\\$/g, "&#36;")
+    .replace(/\\#/g, "#")
+    .replace(/\\_/g, "_")
+    .replace(/\\\^{}/g, "^")
+    .replace(/\\\^/g, "^")
+    .replace(/\\{/g, "{")
+    .replace(/\\}/g, "}");
+
+  // Inline formatting
+  t = t
     .replace(/\\textbf\{([^{}]+)\}/g, "<strong>$1</strong>")
     .replace(/\\textit\{([^{}]+)\}/g, "<em>$1</em>")
     .replace(/\\emph\{([^{}]+)\}/g, "<em>$1</em>")
     .replace(/\\texttt\{([^{}]+)\}/g, "<code>$1</code>")
+    .replace(/\\underline\{([^{}]+)\}/g, "<u>$1</u>")
     .replace(/\\url\{([^{}]+)\}/g, '<a href="$1">$1</a>')
-    .replace(/\\href\{([^{}]+)\}\{([^{}]+)\}/g, '<a href="$1">$2</a>')
+    .replace(/\\href\{([^{}]+)\}\{([^{}]+)\}/g, '<a href="$1">$2</a>');
+
+  // Remove known no-output commands
+  t = t
     .replace(/\\cite\{[^{}]+\}/g, "")
     .replace(/\\ref\{[^{}]+\}/g, "")
     .replace(/\\label\{[^{}]+\}/g, "")
     .replace(/\\footnote\{[^{}]+\}/g, "")
-    .replace(/\\\\/g, "<br>")
-    .replace(/\\hline/g, "")
+    .replace(/\\vspace\*?\{[^{}]+\}/g, "")
+    .replace(/\\hspace\*?\{[^{}]+\}/g, " ")
+    .replace(/\\hline\b/g, "")
     .replace(/\\noindent\b/g, "")
-    .replace(/\\newpage\b/g, '<hr class="pb">')
-    .replace(/\\[a-zA-Z]+\*?(?:\[[^\]]*\])?(?:\{[^{}]*\})*/g, " ")
-    .replace(/\{([^{}]*)\}/g, "$1")
-    .replace(/~/g, " ")
-    .replace(/ {2,}/g, " ")
-    .trim();
+    .replace(/\\par\b/g, "\n\n")
+    .replace(/\\newpage\b/g, '<hr class="pb">');
+
+  // Line breaks
+  t = t.replace(/\\\\\s*/g, "<br>");
+
+  // Strip any remaining unknown commands with arguments
+  t = t.replace(/\\[a-zA-Z]+\*?(?:\[[^\]]*\])*(?:\{[^{}]*\})*/g, " ");
+  // Strip leftover bare braces
+  t = t.replace(/\{([^{}]*)\}/g, "$1");
+
+  // Tilde (non-breaking space)
+  t = t.replace(/~/g, " ");
+
+  return t.replace(/ {2,}/g, " ").trim();
 }
 
 function latexToHtml(source: string): string {
-  const title = source.match(/\\title\{([\s\S]*?)\}/)?.[1]?.trim() ?? "Document";
-  const author = source.match(/\\author\{([\s\S]*?)\}/)?.[1]?.trim() ?? "Anonymous";
-  const rawDate = source.match(/\\date\{([\s\S]*?)\}/)?.[1]?.trim() ?? "";
-  const date =
-    rawDate === "\\today"
-      ? new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })
-      : rawDate;
+  // Protect math before any processing
+  const { protected: safe, restore } = protectMath(source);
 
-  const bodyMatch = source.match(/\\begin\{document\}([\s\S]*?)\\end\{document\}/);
-  let body = bodyMatch ? bodyMatch[1] : source;
+  const title = safe.match(/\\title\{([\s\S]*?)\}/)?.[1]?.trim() ?? "Document";
+  const author = safe.match(/\\author\{([\s\S]*?)\}/)?.[1]?.trim() ?? "Anonymous";
+  const rawDate = safe.match(/\\date\{([\s\S]*?)\}/)?.[1]?.trim() ?? "";
+  const date =
+    !rawDate || rawDate === "\\today"
+      ? new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })
+      : fmt(rawDate);
+
+  // Extract body
+  const bodyMatch = safe.match(/\\begin\{document\}([\s\S]*?)\\end\{document\}/);
+  let body = bodyMatch ? bodyMatch[1] : safe;
 
   body = body.replace(/\\maketitle/g, "");
 
   // Abstract
   body = body.replace(
     /\\begin\{abstract\}([\s\S]*?)\\end\{abstract\}/g,
-    (_, c) =>
-      `<div class="abstract"><p class="abtitle">Abstract</p><p>${fmt(c.trim())}</p></div>`
+    (_, c) => `<div class="abstract"><p class="abtitle">Abstract</p><p>${fmt(c.trim())}</p></div>`
   );
 
   // Sections
-  body = body.replace(/\\section\*?\{([\s\S]*?)\}/g, (_, t) => `<h2>${fmt(t)}</h2>`);
-  body = body.replace(/\\subsection\*?\{([\s\S]*?)\}/g, (_, t) => `<h3>${fmt(t)}</h3>`);
-  body = body.replace(/\\subsubsection\*?\{([\s\S]*?)\}/g, (_, t) => `<h4>${fmt(t)}</h4>`);
+  body = body.replace(/\\section\*?\{([\s\S]*?)\}/g, (_, t) => `\n<h2>${fmt(t)}</h2>\n`);
+  body = body.replace(/\\subsection\*?\{([\s\S]*?)\}/g, (_, t) => `\n<h3>${fmt(t)}</h3>\n`);
+  body = body.replace(/\\subsubsection\*?\{([\s\S]*?)\}/g, (_, t) => `\n<h4>${fmt(t)}</h4>\n`);
 
   // Lists
   body = body.replace(/\\begin\{itemize\}([\s\S]*?)\\end\{itemize\}/g, (_, c) => {
-    const items = c
-      .split("\\item")
-      .slice(1)
-      .map((i: string) => `<li>${fmt(i.trim())}</li>`)
-      .join("");
-    return `<ul>${items}</ul>`;
+    const items = c.split("\\item").slice(1).map((i: string) => `<li>${fmt(i.trim())}</li>`).join("");
+    return `\n<ul>${items}</ul>\n`;
   });
   body = body.replace(/\\begin\{enumerate\}([\s\S]*?)\\end\{enumerate\}/g, (_, c) => {
-    const items = c
-      .split("\\item")
-      .slice(1)
-      .map((i: string) => `<li>${fmt(i.trim())}</li>`)
-      .join("");
-    return `<ol>${items}</ol>`;
+    const items = c.split("\\item").slice(1).map((i: string) => `<li>${fmt(i.trim())}</li>`).join("");
+    return `\n<ol>${items}</ol>\n`;
   });
 
-  // Remove tables (too complex to render inline)
-  body = body.replace(/\\begin\{table\}[\s\S]*?\\end\{table\}/g, "");
-  body = body.replace(/\\begin\{tabular\}[\s\S]*?\\end\{tabular\}/g, "");
+  // Remove any remaining environments we can't render
+  body = body.replace(/\\begin\{(?:table|tabular|figure|wrapfigure|verbatim)\*?\}[\s\S]*?\\end\{(?:table|tabular|figure|wrapfigure|verbatim)\*?\}/g, "");
 
   // Bibliography
   body = body.replace(
     /\\begin\{thebibliography\}\{[^}]*\}([\s\S]*?)\\end\{thebibliography\}/g,
     (_, c) => {
       const refs = c
-        .split("\\bibitem{")
+        .split(/\\bibitem(?:\[[^\]]*\])?\{[^}]*\}/)
         .slice(1)
-        .map((item: string) => {
-          const content = item.replace(/^[^}]+\}/, "").trim();
-          return `<li>${fmt(content)}</li>`;
-        })
+        .map((item: string) => `<li>${fmt(item.trim())}</li>`)
         .join("");
-      return `<h2>References</h2><ol class="refs">${refs}</ol>`;
+      return refs ? `\n<h2>References</h2>\n<ol class="refs">${refs}</ol>\n` : "";
     }
   );
 
+  // Apply fmt to remaining body text
   body = fmt(body);
 
+  // Restore math placeholders
+  body = restore(body);
+
+  // Convert double newlines → paragraphs
   body = body
     .split(/\n{2,}/)
     .map((p: string) => {
       p = p.trim();
       if (!p) return "";
-      if (/^<(h[1-6]|ul|ol|div|hr)/.test(p)) return p;
+      if (/^<(h[1-6]|ul|ol|div|ol|hr)/.test(p)) return p;
       return `<p>${p.replace(/\n/g, " ")}</p>`;
     })
     .filter(Boolean)
     .join("\n");
 
-  return `<div class="doc-header">
-    <h1>${title}</h1>
-    <p class="author">${author}</p>
+  const headerHtml = `<div class="doc-header">
+    <h1>${restore(fmt(title))}</h1>
+    <p class="author">${restore(fmt(author))}</p>
     ${date ? `<p class="date">${date}</p>` : ""}
-  </div>
-  ${body}`;
+  </div>`;
+
+  return headerHtml + "\n" + body;
 }
 
 function buildPreviewHtml(source: string): string {

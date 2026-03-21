@@ -138,29 +138,44 @@ export async function POST(req: NextRequest) {
           const synthesisStream = anthropic.messages.stream({
             model: "claude-sonnet-4-6",
             max_tokens: 4096,
-            system: `You are an academic LaTeX paper generator. Given research gathered by multiple AI agents, you produce a complete, compilable LaTeX document.
+            system: `You are an academic LaTeX paper generator. Produce a complete, error-free LaTeX document from the research provided.
 
-Rules — follow every one:
-1. Output ONLY raw LaTeX. No markdown, no code fences, no commentary before or after.
-2. Start the output directly with \\documentclass — no preamble text whatsoever.
-3. Use \\documentclass[12pt,a4paper]{article}.
-4. Include these packages: geometry (margin=1in), amsmath, amssymb, graphicx, booktabs, hyperref, natbib.
-5. Set author to "Anonymous" and use today's date.
-6. Include: \\begin{abstract}...\\end{abstract}, at least 4 \\section{} blocks, a \\section*{References} with \\begin{thebibliography} entries.
-7. Use \\cite{key} for in-text citations and matching \\bibitem{key} entries.
-8. Use \\textbf{}, \\textit{}, \\emph{} for emphasis; use tabular/booktabs for any tables.
-9. Every \\begin{} must have a matching \\end{}.
-10. The document must end with \\end{document}.`,
+MANDATORY RULES — violating any rule will break the document:
+
+1. Output ONLY raw LaTeX. Zero markdown, zero code fences, zero commentary before or after.
+2. First line must be \\documentclass[12pt,a4paper]{article} — nothing before it.
+3. Use ONLY these three packages (no others):
+   \\usepackage[margin=1in]{geometry}
+   \\usepackage{amsmath}
+   \\usepackage[utf8]{inputenc}
+4. Author: "Anonymous". Date: write the literal current month and year, e.g. \\date{March 2026} — NEVER use \\today.
+5. Document body structure (in this exact order):
+   \\begin{document}
+   \\maketitle
+   \\begin{abstract} ... \\end{abstract}
+   (at least 4 \\section{Title} blocks with substantial prose)
+   \\begin{thebibliography}{99} ... \\end{thebibliography}
+   \\end{document}
+6. Citations: write them as inline text like (Author, Year) — do NOT use \\cite{} commands.
+7. Bibliography: use \\bibitem{refN} entries inside \\begin{thebibliography}{99}.
+8. FORBIDDEN commands — never use any of these:
+   \\cite, \\ref, \\label, \\footnote, \\includegraphics,
+   \\usepackage{booktabs}, \\usepackage{natbib}, \\usepackage{hyperref},
+   \\usepackage{graphicx}, tabular, table, figure environments.
+9. Special characters in plain text — always escape:
+   & → \\&    % → \\%    # → \\#    _ → \\_    ^ → \\^{}
+   Never use bare & % # _ ^ in text paragraphs.
+10. Every \\begin{X} must have exactly one \\end{X}. Final line: \\end{document}.`,
             messages: [
               {
                 role: "user",
-                content: `User's original research request: "${prompt}"
+                content: `Research request: "${prompt}"
 
-The following agents gathered this material:
+Agent findings:
 
 ${agentContext}
 
-Write a complete LaTeX academic paper synthesising all of the above. Follow every rule in the system prompt exactly. Begin your output with \\documentclass — nothing before it.`,
+Write the complete LaTeX paper now. First line must be \\documentclass — nothing before it.`,
               },
             ],
           });

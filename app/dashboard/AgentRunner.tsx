@@ -29,6 +29,24 @@ interface PendingApproval {
   created_at: string;
 }
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function openInOverleaf(latex: string) {
+  const form = document.createElement("form");
+  form.method = "POST";
+  form.action = "https://www.overleaf.com/docs";
+  form.target = "_blank";
+  form.rel = "noopener noreferrer";
+  const input = document.createElement("input");
+  input.type = "hidden";
+  input.name = "snip";
+  input.value = latex;
+  form.appendChild(input);
+  document.body.appendChild(form);
+  form.submit();
+  document.body.removeChild(form);
+}
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const EXAMPLES: Record<Mode, string[]> = {
@@ -214,19 +232,108 @@ function ModeToggle({ mode, onChange }: { mode: Mode; onChange: (m: Mode) => voi
 
 // ─── LaTeXViewer ─────────────────────────────────────────────────────────────
 
+function buildPreviewHtml(source: string): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LaTeX Preview</title>
+<script src="https://cdn.jsdelivr.net/npm/latex.js@0.12.6/dist/latex.js"><\/script>
+<style>
+  *{box-sizing:border-box}
+  body{background:#fff;color:#111;padding:2.5rem 3rem;font-family:Georgia,'Times New Roman',serif;max-width:800px;margin:0 auto;line-height:1.75;font-size:14px}
+  #loading{font:13px/1.6 system-ui,sans-serif;color:#6b7280;padding:2rem 0;text-align:center}
+  #err{color:#b91c1c;font:12px/1.6 monospace;padding:12px 16px;background:#fef2f2;border:1px solid #fecaca;border-radius:6px;margin-top:1rem;display:none}
+</style>
+</head>
+<body>
+<div id="loading">Rendering LaTeX\u2026</div>
+<div id="output"></div>
+<div id="err"></div>
+<script>
+window.addEventListener("DOMContentLoaded", function () {
+  var src = ${JSON.stringify(source)};
+  try {
+    var g = new latexjs.HtmlGenerator({ hyphenate: false });
+    var d = latexjs.parse(src, { generator: g });
+    document.head.appendChild(
+      d.stylesAndScripts("https://cdn.jsdelivr.net/npm/latex.js@0.12.6/dist/")
+    );
+    document.getElementById("output").appendChild(d.domFragment());
+    document.getElementById("loading").remove();
+  } catch (e) {
+    document.getElementById("loading").remove();
+    var el = document.getElementById("err");
+    el.style.display = "block";
+    el.textContent = "Preview failed: " + e.message +
+      " \u2014 download the .tex file to compile a full PDF.";
+  }
+});
+<\/script>
+</body>
+</html>`;
+}
+
 function LaTeXViewer({ text, streaming }: { text: string; streaming: boolean }) {
+  const [preview, setPreview] = useState(false);
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+    };
+  }, [blobUrl]);
+
+  function openPreview() {
+    if (blobUrl) URL.revokeObjectURL(blobUrl);
+    const blob = new Blob([buildPreviewHtml(text)], { type: "text/html" });
+    setBlobUrl(URL.createObjectURL(blob));
+    setPreview(true);
+  }
+
+  function closePreview() {
+    if (blobUrl) {
+      URL.revokeObjectURL(blobUrl);
+      setBlobUrl(null);
+    }
+    setPreview(false);
+  }
+
   return (
-    <div className="relative overflow-x-auto rounded-lg bg-zinc-950 px-5 py-4">
-      {streaming && (
-        <span className="absolute right-3 top-3 flex items-center gap-0.5 text-xs text-zinc-600">
-          <span className="animate-bounce">·</span>
-          <span className="animate-bounce [animation-delay:75ms]">·</span>
-          <span className="animate-bounce [animation-delay:150ms]">·</span>
-        </span>
+    <div>
+      <div className="mb-2 flex justify-end">
+        <button
+          onClick={preview ? closePreview : openPreview}
+          disabled={streaming || !text}
+          className="rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-400 transition-colors hover:border-zinc-500 hover:text-white disabled:opacity-40"
+        >
+          {preview ? "← Source" : "Preview →"}
+        </button>
+      </div>
+
+      {preview && blobUrl ? (
+        <iframe
+          src={blobUrl}
+          className="w-full rounded-lg border border-zinc-700 bg-white"
+          style={{ height: "640px" }}
+          sandbox="allow-scripts"
+          title="LaTeX Preview"
+        />
+      ) : (
+        <div className="relative overflow-x-auto rounded-lg bg-zinc-950 px-5 py-4">
+          {streaming && (
+            <span className="absolute right-3 top-3 flex items-center gap-0.5 text-xs text-zinc-600">
+              <span className="animate-bounce">·</span>
+              <span className="animate-bounce [animation-delay:75ms]">·</span>
+              <span className="animate-bounce [animation-delay:150ms]">·</span>
+            </span>
+          )}
+          <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-zinc-300">
+            {text}
+          </pre>
+        </div>
       )}
-      <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-zinc-300">
-        {text}
-      </pre>
     </div>
   );
 }
@@ -379,6 +486,14 @@ function ReportItem({ report }: { report: Report }) {
       {open && (
         <div className="border-t border-zinc-800">
           <div className="flex justify-end gap-2 px-4 py-2 border-b border-zinc-800/60">
+            {isLatex && (
+              <button
+                onClick={() => openInOverleaf(report.content)}
+                className="rounded-md border border-blue-900 bg-blue-950/40 px-2.5 py-1 text-xs text-blue-400 transition-colors hover:bg-blue-900/40 hover:text-blue-300"
+              >
+                ↗ Preview PDF
+              </button>
+            )}
             <button
               onClick={download}
               className="rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-400 transition-colors hover:border-zinc-500 hover:text-white"
@@ -794,6 +909,14 @@ export default function AgentRunner({
             </div>
             {synthesisDone && (
               <div className="flex gap-2">
+                {isLatexRun && (
+                  <button
+                    onClick={() => openInOverleaf(synthesis)}
+                    className="rounded-md border border-blue-900 bg-blue-950/40 px-2.5 py-1 text-xs text-blue-400 transition-colors hover:bg-blue-900/40 hover:text-blue-300"
+                  >
+                    ↗ Preview PDF
+                  </button>
+                )}
                 <button
                   onClick={downloadAnswer}
                   className="rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-400 transition-colors hover:border-zinc-500 hover:text-white"

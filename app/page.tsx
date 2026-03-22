@@ -488,6 +488,9 @@ export default function LandingPage() {
               Launch your first agent
               <IconArrow className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
             </Link>
+            <p className="mt-4 text-sm text-zinc-500">
+              No credit card. Free forever. Takes 30 seconds to start.
+            </p>
           </div>
         </section>
 
